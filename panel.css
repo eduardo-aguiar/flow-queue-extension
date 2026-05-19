@@ -156,6 +156,44 @@
   box-shadow: 0 0 0 3px rgba(124,109,250,0.12);
 }
 
+#fpq-folder-row {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+
+#fpq-folder-label {
+  font-family: var(--fpq-font-mono);
+  font-size: 11px;
+  color: var(--fpq-text);
+  white-space: nowrap;
+}
+
+#fpq-folder-input {
+  all: initial;
+  font-family: var(--fpq-font-mono);
+  font-size: 12px;
+  color: var(--fpq-text);
+  background: var(--fpq-surface);
+  border: 1px solid var(--fpq-border);
+  border-radius: 6px;
+  padding: 5px 8px;
+  min-width: 0;
+  flex: 1;
+  box-sizing: border-box;
+  transition: border-color 0.2s, box-shadow 0.2s;
+}
+
+#fpq-folder-input::placeholder {
+  color: var(--fpq-muted);
+}
+
+#fpq-folder-input:focus {
+  outline: none;
+  border-color: var(--fpq-accent);
+  box-shadow: 0 0 0 3px rgba(124,109,250,0.12);
+}
+
 #fpq-add-row {
   display: flex;
   gap: 8px;

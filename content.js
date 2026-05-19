@@ -29,6 +29,7 @@
   let running = false;
   let stopFlag = false;
   let delayBetween = 25;
+  let downloadFolder = "flow-images";
   let idCounter = 0;
 
   // ─── PANEL BUILD ──────────────────────────────────────────────
@@ -49,6 +50,10 @@
     <div id="fpq-body">
       <div id="fpq-input-area">
         <textarea id="fpq-textarea" placeholder="Type a prompt… one prompt per line" rows="3"></textarea>
+        <div id="fpq-folder-row">
+          <span id="fpq-folder-label">download folder</span>
+          <input id="fpq-folder-input" type="text" value="flow-images" placeholder="flow-images" />
+        </div>
         <div id="fpq-add-row">
           <span id="fpq-delay-label">delay after completion (s)</span>
           <input id="fpq-delay-input" type="number" min="1" max="300" value="25" />
@@ -78,6 +83,7 @@
 
   const textarea = $("fpq-textarea");
   const delayInput = $("fpq-delay-input");
+  const folderInput = $("fpq-folder-input");
   const addBtn = $("fpq-add-btn");
   const runBtn = $("fpq-run-btn");
   const stopBtn = $("fpq-stop-btn");
@@ -94,6 +100,45 @@
 
   function escHtml(s) {
     return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+  }
+
+  function sanitizeDownloadFolder(value) {
+    const cleaned = String(value || "")
+      .trim()
+      .replace(/\\+/g, "/")
+      .replace(/\/+$/g, "")
+      .replace(/^\/+/, "")
+      .split("/")
+      .map((part) =>
+        part
+          .trim()
+          .normalize("NFD")
+          .replace(/[\u0300-\u036f]/g, "")
+          .replace(/[<>:"|?*\x00-\x1F]/g, "")
+          .replace(/^\.+$/g, "")
+          .replace(/\s+/g, "-"),
+      )
+      .filter(Boolean)
+      .join("/");
+
+    return cleaned || "flow-images";
+  }
+
+  function getDownloadFolder() {
+    return sanitizeDownloadFolder(folderInput?.value || downloadFolder);
+  }
+
+  function buildDownloadFilename(folder, filename) {
+    const safeFolder = sanitizeDownloadFolder(folder);
+    const safeFilename =
+      String(filename || "flow-image")
+        .trim()
+        .replace(/\\+/g, "-")
+        .replace(/\/+/g, "-")
+        .replace(/[<>:"|?*\x00-\x1F]/g, "-")
+        .replace(/^-+|-+$/g, "") || "flow-image";
+
+    return `${safeFolder}/${safeFilename}`;
   }
 
   function setStatus(type, msg) {
@@ -695,8 +740,6 @@
 
     const rect = downloadItem.getBoundingClientRect();
 
-    // Radix submenus usually open when the mouse is on the right side
-    // of the parent menu item, not from a normal DOM click.
     const x = Math.round(rect.right - 8);
     const y = Math.round(rect.top + rect.height / 2);
 
@@ -977,6 +1020,7 @@
 
     textarea.value = "";
     delayBetween = parseInt(delayInput.value, 10) || 5;
+    downloadFolder = getDownloadFolder();
 
     renderQueue();
     setStatus("", `${lines.length} prompt(s) added`);
@@ -1451,6 +1495,7 @@
     titleDot.classList.add("running");
     runBtn.disabled = true;
     delayBetween = parseInt(delayInput.value, 10) || 5;
+    downloadFolder = getDownloadFolder();
 
     let failed = false;
     let failureMessage = "";
@@ -1518,7 +1563,8 @@
         break;
       }
 
-      const filename = makeFilenameFromPrompt(i, item.text);
+      const baseFilename = makeFilenameFromPrompt(i, item.text);
+      const filename = buildDownloadFilename(downloadFolder, baseFilename);
 
       setStatus("", `Generation done. Starting 2K download as ${filename}…`);
 

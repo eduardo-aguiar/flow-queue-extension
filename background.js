@@ -1,11 +1,20 @@
 let nextDownloadFilename = null;
 
 function sanitizeFilename(name) {
-  return String(name || "flow-image")
-    .replace(/[<>:"/\\|?*\x00-\x1F]/g, "")
-    .replace(/\s+/g, " ")
-    .trim()
-    .slice(0, 120);
+  const cleaned = String(name || "flow-image")
+    .replace(/\\+/g, "/")
+    .split("/")
+    .map((part) =>
+      part
+        .trim()
+        .replace(/[<>:"|?*\x00-\x1F]/g, "")
+        .replace(/^\.+$/g, "")
+        .replace(/\s+/g, "-"),
+    )
+    .filter(Boolean)
+    .join("/");
+
+  return cleaned.slice(0, 180) || "flow-image";
 }
 
 chrome.downloads.onDeterminingFilename.addListener((downloadItem, suggest) => {
