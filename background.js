@@ -1,3 +1,32 @@
+let nextDownloadFilename = null;
+
+function sanitizeFilename(name) {
+  return String(name || "flow-image")
+    .replace(/[<>:"/\\|?*\x00-\x1F]/g, "")
+    .replace(/\s+/g, " ")
+    .trim()
+    .slice(0, 120);
+}
+
+chrome.downloads.onDeterminingFilename.addListener((downloadItem, suggest) => {
+  if (!nextDownloadFilename) {
+    return;
+  }
+
+  const originalFilename = downloadItem.filename || "";
+  const extensionMatch = originalFilename.match(/\.[a-zA-Z0-9]+$/);
+  const extension = extensionMatch ? extensionMatch[0] : ".png";
+
+  suggest({
+    filename: `${nextDownloadFilename}${extension}`,
+    conflictAction: "uniquify",
+  });
+
+  nextDownloadFilename = null;
+
+  return true;
+});
+
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   const tabId = sender.tab?.id;
 
@@ -10,13 +39,9 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     try {
       await chrome.debugger.attach({ tabId }, "1.3");
     } catch (err) {
-      const message = err?.message || String(err);
+      const errorMessage = err?.message || String(err);
 
-      /**
-       * Sometimes the debugger is already attached from the previous action.
-       * This should not immediately fail the flow.
-       */
-      if (!message.includes("Another debugger is already attached")) {
+      if (!errorMessage.includes("Another debugger is already attached")) {
         throw err;
       }
     }
@@ -28,6 +53,17 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     } catch (_) {
       // Ignore detach errors.
     }
+  }
+
+  if (message?.type === "FPQ_SET_NEXT_DOWNLOAD_FILENAME") {
+    nextDownloadFilename = sanitizeFilename(message.filename || "flow-image");
+
+    sendResponse({
+      ok: true,
+      filename: nextDownloadFilename,
+    });
+
+    return true;
   }
 
   if (message?.type === "FPQ_INSERT_TEXT") {

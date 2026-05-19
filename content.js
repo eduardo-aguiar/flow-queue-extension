@@ -28,7 +28,7 @@
   let queue = [];
   let running = false;
   let stopFlag = false;
-  let delayBetween = 5;
+  let delayBetween = 25;
   let idCounter = 0;
 
   // ─── PANEL BUILD ──────────────────────────────────────────────
@@ -51,7 +51,7 @@
         <textarea id="fpq-textarea" placeholder="Type a prompt… one prompt per line" rows="3"></textarea>
         <div id="fpq-add-row">
           <span id="fpq-delay-label">delay after completion (s)</span>
-          <input id="fpq-delay-input" type="number" min="1" max="300" value="5" />
+          <input id="fpq-delay-input" type="number" min="1" max="300" value="25" />
           <button id="fpq-add-btn">+ Add to Queue</button>
         </div>
       </div>
@@ -275,6 +275,129 @@
     return (el?.textContent || "").replace(/\s+/g, " ").trim();
   }
 
+  function getElementCenter(el) {
+    const rect = el.getBoundingClientRect();
+
+    return {
+      x: rect.left + rect.width / 2,
+      y: rect.top + rect.height / 2,
+      rect,
+    };
+  }
+
+  function distanceBetweenRects(a, b) {
+    const ac = getElementCenter(a);
+    const bc = getElementCenter(b);
+
+    return Math.hypot(ac.x - bc.x, ac.y - bc.y);
+  }
+
+  function findBestCardContainer(tile) {
+    if (!tile) return null;
+
+    const byKnownCardClass = tile.closest(".sc-1046f06c-0");
+
+    if (byKnownCardClass) return byKnownCardClass;
+
+    const byTileId = tile.closest("[data-tile-id]");
+
+    if (byTileId) return byTileId;
+
+    let current = tile;
+    let best = tile;
+
+    for (let i = 0; i < 8 && current?.parentElement; i++) {
+      current = current.parentElement;
+
+      if (!isVisible(current)) continue;
+
+      const rect = current.getBoundingClientRect();
+      const bestRect = best.getBoundingClientRect();
+
+      if (rect.width * rect.height > bestRect.width * bestRect.height) {
+        best = current;
+      }
+    }
+
+    return best;
+  }
+
+  function buttonLooksLikeMore(btn) {
+    const iconText = btn.querySelector("i")?.textContent?.trim();
+
+    if (
+      iconText === "more_vert" ||
+      iconText === "more_horiz" ||
+      iconText === "more" ||
+      iconText === "kebab_vertical" ||
+      iconText === "overflow"
+    ) {
+      return true;
+    }
+
+    const label = [
+      btn.getAttribute("aria-label"),
+      btn.getAttribute("title"),
+      btn.textContent,
+    ]
+      .filter(Boolean)
+      .join(" ")
+      .toLowerCase();
+
+    return (
+      label.includes("more") ||
+      label.includes("options") ||
+      label.includes("menu") ||
+      label.includes("actions")
+    );
+  }
+
+  function makeFilenameFromPrompt(index, prompt) {
+    const slug =
+      String(prompt || "flow-image")
+        .slice(0, 70)
+        .toLowerCase()
+        .normalize("NFD")
+        .replace(/[\u0300-\u036f]/g, "")
+        .replace(/[^\p{L}\p{N}]+/gu, "-")
+        .replace(/^-+|-+$/g, "") || "flow-image";
+
+    return `flow-${String(index + 1).padStart(3, "0")}-${slug}`;
+  }
+
+  async function setNextDownloadFilename(filename) {
+    return new Promise((resolve) => {
+      chrome.runtime.sendMessage(
+        {
+          type: "FPQ_SET_NEXT_DOWNLOAD_FILENAME",
+          filename,
+        },
+        (response) => {
+          if (chrome.runtime.lastError) {
+            console.warn(
+              "[Flow Queue] Could not set next download filename:",
+              chrome.runtime.lastError.message,
+            );
+
+            resolve(false);
+            return;
+          }
+
+          if (!response?.ok) {
+            console.warn(
+              "[Flow Queue] Could not set next download filename:",
+              response,
+            );
+            resolve(false);
+            return;
+          }
+
+          resolve(true);
+        },
+      );
+    });
+  }
+
   async function realClickElement(el, label = "element") {
     if (!el || !isVisible(el)) {
       console.warn(`[Flow Queue] Cannot click ${label}: not visible`);
@@ -430,13 +553,7 @@
     return true;
   }
 
-  async function moveMouseToElement(el, label = "element") {
-    if (!el || !isVisible(el)) return false;
-
-    const rect = el.getBoundingClientRect();
-    const x = Math.round(rect.left + rect.width / 2);
-    const y = Math.round(rect.top + rect.height / 2);
-
+  async function moveMouseToPoint(x, y, label = "point") {
     return new Promise((resolve) => {
       chrome.runtime.sendMessage(
         {
@@ -461,52 +578,42 @@
     });
   }
 
+  async function moveMouseToElement(el, label = "element") {
+    if (!el || !isVisible(el)) return false;
+
+    const rect = el.getBoundingClientRect();
+    const x = Math.round(rect.left + rect.width / 2);
+    const y = Math.round(rect.top + rect.height / 2);
+
+    return moveMouseToPoint(x, y, label);
+  }
+
   function findTileMoreButton(tile) {
     if (!tile) return null;
 
-    const candidates = Array.from(
-      tile.querySelectorAll("button, [role='button']"),
+    const card = findBestCardContainer(tile);
+
+    const localCandidates = Array.from(
+      card.querySelectorAll("button, [role='button']"),
     );
 
-    const byIcon = candidates.find((btn) => {
-      const iconText = btn.querySelector("i")?.textContent?.trim();
+    const localMoreButton = localCandidates.find(buttonLooksLikeMore);
 
-      return (
-        iconText === "more_vert" ||
-        iconText === "more_horiz" ||
-        iconText === "more"
-      );
-    });
+    if (localMoreButton) return localMoreButton;
 
-    if (byIcon) return byIcon;
+    const globalCandidates = Array.from(
+      document.querySelectorAll("button, [role='button']"),
+    ).filter((btn) => isVisible(btn) && buttonLooksLikeMore(btn));
 
-    const byLabel = candidates.find((btn) => {
-      const label = [
-        btn.getAttribute("aria-label"),
-        btn.getAttribute("title"),
-        btn.textContent,
-      ]
-        .filter(Boolean)
-        .join(" ")
-        .toLowerCase();
+    if (!globalCandidates.length) {
+      return null;
+    }
 
-      return (
-        label.includes("more") ||
-        label.includes("options") ||
-        label.includes("menu")
-      );
-    });
+    globalCandidates.sort(
+      (a, b) => distanceBetweenRects(a, card) - distanceBetweenRects(b, card),
+    );
 
-    if (byLabel) return byLabel;
-
-    /**
-     * Last-resort fallback:
-     * after hover, the more button is often one of the last visible buttons
-     * inside the completed card.
-     */
-    const visibleButtons = candidates.filter(isVisible);
-
-    return visibleButtons[visibleButtons.length - 1] || null;
+    return globalCandidates[0];
   }
 
   async function waitForMenuOpen(timeout = 5000) {
@@ -519,16 +626,46 @@
 
       if (menu) return menu;
 
-      await sleep(250);
+      await sleep(500);
+    }
+
+    return null;
+  }
+
+  async function getVisibleMenuItems() {
+    return Array.from(document.querySelectorAll('[role="menuitem"]')).filter(
+      isVisible,
+    );
+  }
+
+  async function waitForDownloadSubmenuOpen(timeout = 8000) {
+    const started = Date.now();
+
+    while (Date.now() - started < timeout) {
+      const menuItems = await getVisibleMenuItems();
+
+      const twoKItem = menuItems.find((item) => {
+        const text = getVisibleText(item).toLowerCase();
+        const ariaDisabled = item.getAttribute("aria-disabled") === "true";
+
+        return (
+          !ariaDisabled &&
+          (text.includes("2k") ||
+            text.includes("2 k") ||
+            text.includes("upscaled"))
+        );
+      });
+
+      if (twoKItem) return twoKItem;
+
+      await sleep(300);
     }
 
     return null;
   }
 
   async function clickDownloadMenuItem() {
-    const menuItems = Array.from(
-      document.querySelectorAll('[role="menuitem"]'),
-    ).filter(isVisible);
+    const menuItems = await getVisibleMenuItems();
 
     const downloadItem = menuItems.find((item) => {
       const text = getVisibleText(item).toLowerCase();
@@ -537,7 +674,9 @@
         (icon) => icon.textContent?.trim() === "download",
       );
 
-      const hasSubmenu = item.getAttribute("aria-haspopup") === "menu";
+      const hasSubmenu =
+        item.getAttribute("aria-haspopup") === "menu" ||
+        item.getAttribute("aria-expanded") !== null;
 
       return hasDownloadIcon && hasSubmenu && text.includes("download");
     });
@@ -547,89 +686,176 @@
       return false;
     }
 
-    downloadItem.dispatchEvent(
-      new PointerEvent("pointermove", {
-        bubbles: true,
-        cancelable: true,
-        view: window,
-      }),
+    downloadItem.scrollIntoView({
+      block: "center",
+      inline: "center",
+    });
+
+    await sleep(300);
+
+    const rect = downloadItem.getBoundingClientRect();
+
+    // Radix submenus usually open when the mouse is on the right side
+    // of the parent menu item, not from a normal DOM click.
+    const x = Math.round(rect.right - 8);
+    const y = Math.round(rect.top + rect.height / 2);
+
+    await moveMouseToPoint(x, y, "Download submenu trigger");
+
+    const hoverEvents = [
+      "pointerover",
+      "pointerenter",
+      "pointermove",
+      "mouseover",
+      "mouseenter",
+      "mousemove",
+    ];
+
+    for (const eventName of hoverEvents) {
+      const EventCtor = eventName.startsWith("pointer")
+        ? PointerEvent
+        : MouseEvent;
+
+      downloadItem.dispatchEvent(
+        new EventCtor(eventName, {
+          bubbles: true,
+          cancelable: true,
+          view: window,
+          clientX: x,
+          clientY: y,
+          pointerType: "mouse",
+        }),
+      );
+    }
+
+    await sleep(1200);
+
+    const submenuItem = await waitForDownloadSubmenuOpen(5000);
+
+    if (submenuItem) {
+      console.log("[Flow Queue] Download submenu opened by hover");
+      return true;
+    }
+
+    console.warn(
+      "[Flow Queue] Hover did not open Download submenu, trying click",
     );
 
-    downloadItem.dispatchEvent(
-      new MouseEvent("mouseover", {
-        bubbles: true,
-        cancelable: true,
-        view: window,
-      }),
-    );
+    await realClickElement(downloadItem, "Download menu item fallback click");
+    await sleep(1200);
 
-    await sleep(400);
-
-    return realClickElement(downloadItem, "Download menu item");
+    return Boolean(await waitForDownloadSubmenuOpen(5000));
   }
 
   async function clickDownloadSubmenuOption() {
     const started = Date.now();
-    const timeout = 7000;
+    const timeout = 10000;
 
     while (Date.now() - started < timeout) {
-      const menuItems = Array.from(
-        document.querySelectorAll('[role="menuitem"]'),
-      ).filter(isVisible);
+      const menuItems = await getVisibleMenuItems();
 
       const twoKItem = menuItems.find((item) => {
         const text = getVisibleText(item).toLowerCase();
         const ariaDisabled = item.getAttribute("aria-disabled") === "true";
 
         return (
-          !ariaDisabled && text.includes("2k") && text.includes("upscaled")
+          !ariaDisabled &&
+          (text.includes("2k") ||
+            text.includes("2 k") ||
+            text.includes("upscaled"))
         );
       });
 
       if (twoKItem) {
+        await moveMouseToElement(twoKItem, "2K download option");
+        await sleep(300);
+
         return realClickElement(twoKItem, "2K download option");
       }
 
-      await sleep(250);
+      await sleep(300);
     }
 
     console.warn("[Flow Queue] 2K download option not found");
     return false;
   }
 
-  async function downloadTile(tile) {
+  async function downloadTile(tile, filename = "flow-image") {
     if (!tile || !isVisible(tile)) {
       console.warn("[Flow Queue] Cannot download: completed tile not found");
       return false;
     }
 
+    const card = findBestCardContainer(tile);
+
+    if (!card || !isVisible(card)) {
+      console.warn("[Flow Queue] Cannot download: card container not found", {
+        tileText: tile.textContent?.trim(),
+      });
+
+      setStatus("warn", "Could not find completed card container");
+      return false;
+    }
+
     setStatus("", "Hovering completed card…");
 
-    await hoverElement(tile, "completed tile");
+    await hoverElement(card, "completed card container");
+    await moveMouseToElement(card, "completed card container");
 
-    /**
-     * Real mouse move helps because Flow only reveals the card controls
-     * when the actual pointer is over the card, not just synthetic hover events.
-     */
-    await moveMouseToElement(tile, "completed tile");
+    const rect = card.getBoundingClientRect();
+
+    const hoverPoints = [
+      {
+        x: Math.round(rect.left + rect.width / 2),
+        y: Math.round(rect.top + rect.height / 2),
+      },
+      {
+        x: Math.round(rect.right - 20),
+        y: Math.round(rect.top + 20),
+      },
+      {
+        x: Math.round(rect.right - 20),
+        y: Math.round(rect.top + rect.height / 2),
+      },
+      {
+        x: Math.round(rect.right - 20),
+        y: Math.round(rect.bottom - 20),
+      },
+    ];
+
+    for (const point of hoverPoints) {
+      await moveMouseToPoint(point.x, point.y, "card hover point");
+      await sleep(500);
+    }
 
     await sleep(1500);
 
     setStatus("", "Opening card menu to download…");
 
-    let moreButton = findTileMoreButton(tile);
+    let moreButton = findTileMoreButton(card);
 
     if (!moreButton) {
       console.warn("[Flow Queue] More/options button not found after hover", {
-        tileText: tile.textContent?.trim(),
-        buttons: Array.from(
-          tile.querySelectorAll("button, [role='button']"),
+        cardText: card.textContent?.trim(),
+        cardHtml: card.outerHTML?.slice(0, 2000),
+        globalButtons: Array.from(
+          document.querySelectorAll("button, [role='button']"),
         ).map((btn) => ({
           text: btn.textContent?.trim(),
           ariaLabel: btn.getAttribute("aria-label"),
           title: btn.getAttribute("title"),
           visible: isVisible(btn),
           icon: btn.querySelector("i")?.textContent?.trim(),
+          rect: (() => {
+            const r = btn.getBoundingClientRect();
+
+            return {
+              x: Math.round(r.x),
+              y: Math.round(r.y),
+              width: Math.round(r.width),
+              height: Math.round(r.height),
+            };
+          })(),
         })),
       });
 
@@ -637,10 +863,6 @@
       return false;
     }
 
-    /**
-     * Hover the button itself too, because some menus/buttons only become
-     * clickable after the pointer enters the control area.
-     */
     await hoverElement(moreButton, "more/options button");
     await moveMouseToElement(moreButton, "more/options button");
 
@@ -666,13 +888,15 @@
     const clickedDownload = await clickDownloadMenuItem();
 
     if (!clickedDownload) {
-      setStatus("warn", "Could not click Download");
+      setStatus("warn", "Could not hover/open Download submenu");
       return false;
     }
 
-    await sleep(800);
+    await sleep(1500);
 
     setStatus("", "Selecting 2K download option…");
+
+    await setNextDownloadFilename(filename);
 
     const clicked2K = await clickDownloadSubmenuOption();
 
@@ -887,7 +1111,7 @@
         return btn;
       }
 
-      await sleep(300);
+      await sleep(500);
     }
 
     return null;
@@ -1294,9 +1518,11 @@
         break;
       }
 
-      setStatus("", "Generation done. Starting 2K download…");
+      const filename = makeFilenameFromPrompt(i, item.text);
 
-      const downloaded = await downloadTile(result.tile);
+      setStatus("", `Generation done. Starting 2K download as ${filename}…`);
+
+      const downloaded = await downloadTile(result.tile, filename);
 
       if (!downloaded) {
         console.warn(
