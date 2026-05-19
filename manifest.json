@@ -10,7 +10,8 @@
     "scripting",
     "clipboardWrite",
     "clipboardRead",
-    "activeTab"
+    "activeTab",
+    "downloads"
   ],
   "host_permissions": ["https://labs.google/*"],
   "background": {

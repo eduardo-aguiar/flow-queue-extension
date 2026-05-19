@@ -6,34 +6,59 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     return;
   }
 
+  async function attachDebugger() {
+    try {
+      await chrome.debugger.attach({ tabId }, "1.3");
+    } catch (err) {
+      const message = err?.message || String(err);
+
+      /**
+       * Sometimes the debugger is already attached from the previous action.
+       * This should not immediately fail the flow.
+       */
+      if (!message.includes("Another debugger is already attached")) {
+        throw err;
+      }
+    }
+  }
+
+  async function detachDebugger() {
+    try {
+      await chrome.debugger.detach({ tabId });
+    } catch (_) {
+      // Ignore detach errors.
+    }
+  }
+
   if (message?.type === "FPQ_INSERT_TEXT") {
     (async () => {
       try {
-        await chrome.debugger.attach({ tabId }, "1.3");
+        await attachDebugger();
 
         await chrome.debugger.sendCommand({ tabId }, "Input.insertText", {
           text: message.text,
         });
 
-        await chrome.debugger.detach({ tabId });
+        await detachDebugger();
 
         sendResponse({ ok: true });
       } catch (err) {
-        try {
-          await chrome.debugger.detach({ tabId });
-        } catch (_) {}
+        await detachDebugger();
 
-        sendResponse({ ok: false, error: err?.message || String(err) });
+        sendResponse({
+          ok: false,
+          error: err?.message || String(err),
+        });
       }
     })();
 
     return true;
   }
 
-  if (message?.type === "FPQ_CLICK_AT") {
+  if (message?.type === "FPQ_MOUSE_MOVE_TO") {
     (async () => {
       try {
-        await chrome.debugger.attach({ tabId }, "1.3");
+        await attachDebugger();
 
         await chrome.debugger.sendCommand(
           { tabId },
@@ -43,6 +68,40 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
             x: message.x,
             y: message.y,
             button: "none",
+            pointerType: "mouse",
+          },
+        );
+
+        await detachDebugger();
+
+        sendResponse({ ok: true });
+      } catch (err) {
+        await detachDebugger();
+
+        sendResponse({
+          ok: false,
+          error: err?.message || String(err),
+        });
+      }
+    })();
+
+    return true;
+  }
+
+  if (message?.type === "FPQ_CLICK_AT") {
+    (async () => {
+      try {
+        await attachDebugger();
+
+        await chrome.debugger.sendCommand(
+          { tabId },
+          "Input.dispatchMouseEvent",
+          {
+            type: "mouseMoved",
+            x: message.x,
+            y: message.y,
+            button: "none",
+            pointerType: "mouse",
           },
         );
 
@@ -55,6 +114,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
             y: message.y,
             button: "left",
             clickCount: 1,
+            pointerType: "mouse",
           },
         );
 
@@ -67,18 +127,20 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
             y: message.y,
             button: "left",
             clickCount: 1,
+            pointerType: "mouse",
           },
         );
 
-        await chrome.debugger.detach({ tabId });
+        await detachDebugger();
 
         sendResponse({ ok: true });
       } catch (err) {
-        try {
-          await chrome.debugger.detach({ tabId });
-        } catch (_) {}
+        await detachDebugger();
 
-        sendResponse({ ok: false, error: err?.message || String(err) });
+        sendResponse({
+          ok: false,
+          error: err?.message || String(err),
+        });
       }
     })();
 
@@ -88,7 +150,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (message?.type === "FPQ_PRESS_ENTER") {
     (async () => {
       try {
-        await chrome.debugger.attach({ tabId }, "1.3");
+        await attachDebugger();
 
         await chrome.debugger.sendCommand({ tabId }, "Input.dispatchKeyEvent", {
           type: "keyDown",
@@ -106,18 +168,24 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           nativeVirtualKeyCode: 13,
         });
 
-        await chrome.debugger.detach({ tabId });
+        await detachDebugger();
 
         sendResponse({ ok: true });
       } catch (err) {
-        try {
-          await chrome.debugger.detach({ tabId });
-        } catch (_) {}
+        await detachDebugger();
 
-        sendResponse({ ok: false, error: err?.message || String(err) });
+        sendResponse({
+          ok: false,
+          error: err?.message || String(err),
+        });
       }
     })();
 
     return true;
   }
+
+  sendResponse({
+    ok: false,
+    error: `Unknown message type: ${message?.type}`,
+  });
 });

@@ -271,6 +271,423 @@
     return hasVisibleMedia || hasVisibleReusePrompt || hasVisibleDelete;
   }
 
+  function getVisibleText(el) {
+    return (el?.textContent || "").replace(/\s+/g, " ").trim();
+  }
+
+  async function realClickElement(el, label = "element") {
+    if (!el || !isVisible(el)) {
+      console.warn(`[Flow Queue] Cannot click ${label}: not visible`);
+      return false;
+    }
+
+    el.scrollIntoView({
+      block: "center",
+      inline: "center",
+    });
+
+    await sleep(500);
+
+    const rect = el.getBoundingClientRect();
+
+    const isSubmenuTrigger =
+      el.getAttribute("aria-haspopup") === "menu" ||
+      el.getAttribute("aria-expanded") !== null;
+
+    const x = Math.round(
+      isSubmenuTrigger
+        ? rect.right - Math.min(12, rect.width / 4)
+        : rect.left + rect.width / 2,
+    );
+
+    const y = Math.round(rect.top + rect.height / 2);
+
+    const clicked = await new Promise((resolve) => {
+      chrome.runtime.sendMessage(
+        {
+          type: "FPQ_CLICK_AT",
+          x,
+          y,
+        },
+        (response) => {
+          if (chrome.runtime.lastError) {
+            console.warn(
+              `[Flow Queue] Debugger click failed for ${label}:`,
+              chrome.runtime.lastError.message,
+            );
+
+            resolve(false);
+            return;
+          }
+
+          if (!response?.ok) {
+            console.warn(
+              `[Flow Queue] Debugger click failed for ${label}:`,
+              response,
+            );
+            resolve(false);
+            return;
+          }
+
+          resolve(true);
+        },
+      );
+    });
+
+    if (clicked) return true;
+
+    try {
+      el.click();
+      return true;
+    } catch (err) {
+      console.warn(`[Flow Queue] Fallback click failed for ${label}:`, err);
+      return false;
+    }
+  }
+
+  function findVisibleMenuItemByText(text) {
+    const target = text.toLowerCase();
+
+    return Array.from(document.querySelectorAll('[role="menuitem"]')).find(
+      (item) => {
+        if (!isVisible(item)) return false;
+
+        const itemText = getVisibleText(item).toLowerCase();
+
+        return itemText.includes(target);
+      },
+    );
+  }
+
+  async function hoverElement(el, label = "element") {
+    if (!el) return false;
+
+    el.scrollIntoView({
+      block: "center",
+      inline: "center",
+    });
+
+    await sleep(500);
+
+    const rect = el.getBoundingClientRect();
+    const x = Math.round(rect.left + rect.width / 2);
+    const y = Math.round(rect.top + rect.height / 2);
+
+    const events = [
+      new PointerEvent("pointerover", {
+        bubbles: true,
+        cancelable: true,
+        view: window,
+        clientX: x,
+        clientY: y,
+        pointerType: "mouse",
+      }),
+      new PointerEvent("pointerenter", {
+        bubbles: true,
+        cancelable: true,
+        view: window,
+        clientX: x,
+        clientY: y,
+        pointerType: "mouse",
+      }),
+      new PointerEvent("pointermove", {
+        bubbles: true,
+        cancelable: true,
+        view: window,
+        clientX: x,
+        clientY: y,
+        pointerType: "mouse",
+      }),
+      new MouseEvent("mouseover", {
+        bubbles: true,
+        cancelable: true,
+        view: window,
+        clientX: x,
+        clientY: y,
+      }),
+      new MouseEvent("mouseenter", {
+        bubbles: true,
+        cancelable: true,
+        view: window,
+        clientX: x,
+        clientY: y,
+      }),
+      new MouseEvent("mousemove", {
+        bubbles: true,
+        cancelable: true,
+        view: window,
+        clientX: x,
+        clientY: y,
+      }),
+    ];
+
+    events.forEach((event) => el.dispatchEvent(event));
+
+    console.log(`[Flow Queue] Hovered ${label}`);
+
+    await sleep(1200);
+
+    return true;
+  }
+
+  async function moveMouseToElement(el, label = "element") {
+    if (!el || !isVisible(el)) return false;
+
+    const rect = el.getBoundingClientRect();
+    const x = Math.round(rect.left + rect.width / 2);
+    const y = Math.round(rect.top + rect.height / 2);
+
+    return new Promise((resolve) => {
+      chrome.runtime.sendMessage(
+        {
+          type: "FPQ_MOUSE_MOVE_TO",
+          x,
+          y,
+        },
+        (response) => {
+          if (chrome.runtime.lastError) {
+            console.warn(
+              `[Flow Queue] Debugger mouse move failed for ${label}:`,
+              chrome.runtime.lastError.message,
+            );
+
+            resolve(false);
+            return;
+          }
+
+          resolve(Boolean(response?.ok));
+        },
+      );
+    });
+  }
+
+  function findTileMoreButton(tile) {
+    if (!tile) return null;
+
+    const candidates = Array.from(
+      tile.querySelectorAll("button, [role='button']"),
+    );
+
+    const byIcon = candidates.find((btn) => {
+      const iconText = btn.querySelector("i")?.textContent?.trim();
+
+      return (
+        iconText === "more_vert" ||
+        iconText === "more_horiz" ||
+        iconText === "more"
+      );
+    });
+
+    if (byIcon) return byIcon;
+
+    const byLabel = candidates.find((btn) => {
+      const label = [
+        btn.getAttribute("aria-label"),
+        btn.getAttribute("title"),
+        btn.textContent,
+      ]
+        .filter(Boolean)
+        .join(" ")
+        .toLowerCase();
+
+      return (
+        label.includes("more") ||
+        label.includes("options") ||
+        label.includes("menu")
+      );
+    });
+
+    if (byLabel) return byLabel;
+
+    /**
+     * Last-resort fallback:
+     * after hover, the more button is often one of the last visible buttons
+     * inside the completed card.
+     */
+    const visibleButtons = candidates.filter(isVisible);
+
+    return visibleButtons[visibleButtons.length - 1] || null;
+  }
+
+  async function waitForMenuOpen(timeout = 5000) {
+    const started = Date.now();
+
+    while (Date.now() - started < timeout) {
+      const menu = Array.from(document.querySelectorAll('[role="menu"]')).find(
+        isVisible,
+      );
+
+      if (menu) return menu;
+
+      await sleep(250);
+    }
+
+    return null;
+  }
+
+  async function clickDownloadMenuItem() {
+    const menuItems = Array.from(
+      document.querySelectorAll('[role="menuitem"]'),
+    ).filter(isVisible);
+
+    const downloadItem = menuItems.find((item) => {
+      const text = getVisibleText(item).toLowerCase();
+
+      const hasDownloadIcon = Array.from(item.querySelectorAll("i")).some(
+        (icon) => icon.textContent?.trim() === "download",
+      );
+
+      const hasSubmenu = item.getAttribute("aria-haspopup") === "menu";
+
+      return hasDownloadIcon && hasSubmenu && text.includes("download");
+    });
+
+    if (!downloadItem) {
+      console.warn("[Flow Queue] Download menu item not found");
+      return false;
+    }
+
+    downloadItem.dispatchEvent(
+      new PointerEvent("pointermove", {
+        bubbles: true,
+        cancelable: true,
+        view: window,
+      }),
+    );
+
+    downloadItem.dispatchEvent(
+      new MouseEvent("mouseover", {
+        bubbles: true,
+        cancelable: true,
+        view: window,
+      }),
+    );
+
+    await sleep(400);
+
+    return realClickElement(downloadItem, "Download menu item");
+  }
+
+  async function clickDownloadSubmenuOption() {
+    const started = Date.now();
+    const timeout = 7000;
+
+    while (Date.now() - started < timeout) {
+      const menuItems = Array.from(
+        document.querySelectorAll('[role="menuitem"]'),
+      ).filter(isVisible);
+
+      const twoKItem = menuItems.find((item) => {
+        const text = getVisibleText(item).toLowerCase();
+        const ariaDisabled = item.getAttribute("aria-disabled") === "true";
+
+        return (
+          !ariaDisabled && text.includes("2k") && text.includes("upscaled")
+        );
+      });
+
+      if (twoKItem) {
+        return realClickElement(twoKItem, "2K download option");
+      }
+
+      await sleep(250);
+    }
+
+    console.warn("[Flow Queue] 2K download option not found");
+    return false;
+  }
+
+  async function downloadTile(tile) {
+    if (!tile || !isVisible(tile)) {
+      console.warn("[Flow Queue] Cannot download: completed tile not found");
+      return false;
+    }
+
+    setStatus("", "Hovering completed card…");
+
+    await hoverElement(tile, "completed tile");
+
+    /**
+     * Real mouse move helps because Flow only reveals the card controls
+     * when the actual pointer is over the card, not just synthetic hover events.
+     */
+    await moveMouseToElement(tile, "completed tile");
+
+    await sleep(1500);
+
+    setStatus("", "Opening card menu to download…");
+
+    let moreButton = findTileMoreButton(tile);
+
+    if (!moreButton) {
+      console.warn("[Flow Queue] More/options button not found after hover", {
+        tileText: tile.textContent?.trim(),
+        buttons: Array.from(
+          tile.querySelectorAll("button, [role='button']"),
+        ).map((btn) => ({
+          text: btn.textContent?.trim(),
+          ariaLabel: btn.getAttribute("aria-label"),
+          title: btn.getAttribute("title"),
+          visible: isVisible(btn),
+          icon: btn.querySelector("i")?.textContent?.trim(),
+        })),
+      });
+
+      setStatus("warn", "Could not find card menu button after hover");
+      return false;
+    }
+
+    /**
+     * Hover the button itself too, because some menus/buttons only become
+     * clickable after the pointer enters the control area.
+     */
+    await hoverElement(moreButton, "more/options button");
+    await moveMouseToElement(moreButton, "more/options button");
+
+    const opened = await realClickElement(
+      moreButton,
+      "tile more/options button",
+    );
+
+    if (!opened) {
+      setStatus("warn", "Could not open card menu");
+      return false;
+    }
+
+    const menu = await waitForMenuOpen();
+
+    if (!menu) {
+      setStatus("warn", "Card menu did not open");
+      return false;
+    }
+
+    setStatus("", "Opening Download submenu…");
+
+    const clickedDownload = await clickDownloadMenuItem();
+
+    if (!clickedDownload) {
+      setStatus("warn", "Could not click Download");
+      return false;
+    }
+
+    await sleep(800);
+
+    setStatus("", "Selecting 2K download option…");
+
+    const clicked2K = await clickDownloadSubmenuOption();
+
+    if (!clicked2K) {
+      setStatus("warn", "Could not select 2K download option");
+      return false;
+    }
+
+    setStatus("ok", "2K download triggered");
+
+    await sleep(2000);
+
+    return true;
+  }
+
   // ─── DRAGGING ─────────────────────────────────────────────────
   let dragging = false;
   let dragOffX = 0;
@@ -709,11 +1126,6 @@
         latestNewTile = newTiles[newTiles.length - 1];
       }
 
-      /**
-       * If we can see a percentage like 37%, the generation is definitely active.
-       * Do NOT check for failed state while progress is visible.
-       * Flow may keep hidden/stale "Failed" DOM inside the same tile.
-       */
       if (progressVisible) {
         sawGenerationStart = true;
         stableCompletedChecks = 0;
@@ -730,11 +1142,6 @@
         continue;
       }
 
-      /**
-       * Same protection, but scoped to the latest tile.
-       * Even if global progress detection misses it, if this tile has "37%",
-       * we should treat it as still generating and skip failure checks.
-       */
       if (latestNewTile && tileHasProgress(latestNewTile)) {
         sawGenerationStart = true;
         stableCompletedChecks = 0;
@@ -754,16 +1161,17 @@
         continue;
       }
 
-      /**
-       * Only check failed after there is no visible progress anymore.
-       */
       if (latestNewTile && tileIsFailed(latestNewTile)) {
         console.warn("[Flow Queue] Generation failed:", {
           tileText: latestNewTile.textContent?.trim(),
         });
 
         setStatus("err", "Generation failed");
-        return "failed";
+
+        return {
+          status: "failed",
+          tile: latestNewTile,
+        };
       }
 
       if (
@@ -776,7 +1184,10 @@
         setStatus("", "Generation completed, confirming card is stable…");
 
         if (stableCompletedChecks >= 2) {
-          return "done";
+          return {
+            status: "done",
+            tile: latestNewTile,
+          };
         }
       } else if (sawGenerationStart && latestNewTile) {
         stableCompletedChecks = 0;
@@ -794,7 +1205,10 @@
       latestNewTileText: latestNewTile?.textContent?.trim(),
     });
 
-    return "timeout";
+    return {
+      status: "timeout",
+      tile: latestNewTile,
+    };
   }
 
   // ─── RUN QUEUE ────────────────────────────────────────────────
@@ -865,19 +1279,33 @@
 
       const result = await waitForCompletion(previousTileIds);
 
-      if (result !== "done") {
+      if (result.status !== "done") {
         failed = true;
 
         failureMessage =
-          result === "failed"
+          result.status === "failed"
             ? `Prompt ${i + 1} failed during generation`
             : `Prompt ${i + 1} timed out`;
 
-        setStatus(result === "failed" ? "err" : "warn", failureMessage);
+        setStatus(result.status === "failed" ? "err" : "warn", failureMessage);
 
         item.active = false;
         renderQueue();
         break;
+      }
+
+      setStatus("", "Generation done. Starting 2K download…");
+
+      const downloaded = await downloadTile(result.tile);
+
+      if (!downloaded) {
+        console.warn(
+          "[Flow Queue] Download step failed, continuing queue anyway",
+        );
+        setStatus(
+          "warn",
+          "Generation done, but download could not be confirmed",
+        );
       }
 
       item.done = true;
@@ -887,7 +1315,7 @@
       if (i < queue.length - 1 && !stopFlag) {
         setStatus(
           "",
-          `Generation done. Waiting ${delayBetween}s before next prompt…`,
+          `Download step finished. Waiting ${delayBetween}s before next prompt…`,
         );
         await sleep(delayBetween * 1000);
       }
