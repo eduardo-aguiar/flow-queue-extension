@@ -1,0 +1,36 @@
+{
+  "manifest_version": 3,
+  "name": "Flow Prompt Queue",
+  "version": "1.0.0",
+  "description": "Queue and auto-run multiple prompts on Google Flow",
+  "permissions": [
+    "debugger",
+    "tabs",
+    "storage",
+    "scripting",
+    "clipboardWrite",
+    "clipboardRead",
+    "activeTab"
+  ],
+  "host_permissions": ["https://labs.google/*"],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "content_scripts": [
+    {
+      "matches": ["https://labs.google/fx/tools/flow*"],
+      "js": ["content.js"],
+      "css": ["panel.css"],
+      "run_at": "document_idle"
+    }
+  ],
+  "action": {
+    "default_popup": "popup.html",
+    "default_title": "Flow Prompt Queue"
+  },
+  "icons": {
+    "16": "icon.svg",
+    "48": "icon.svg",
+    "128": "icon.svg"
+  }
+}
