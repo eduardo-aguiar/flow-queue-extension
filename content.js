@@ -105,15 +105,29 @@
     if (!el) return false;
 
     const rect = el.getBoundingClientRect();
-    const style = window.getComputedStyle(el);
 
-    return (
-      rect.width > 0 &&
-      rect.height > 0 &&
-      style.display !== "none" &&
-      style.visibility !== "hidden" &&
-      style.opacity !== "0"
-    );
+    if (rect.width <= 0 || rect.height <= 0) {
+      return false;
+    }
+
+    let current = el;
+
+    while (current && current !== document.body) {
+      const style = window.getComputedStyle(current);
+
+      if (
+        style.display === "none" ||
+        style.visibility === "hidden" ||
+        style.opacity === "0" ||
+        current.getAttribute("aria-hidden") === "true"
+      ) {
+        return false;
+      }
+
+      current = current.parentElement;
+    }
+
+    return true;
   }
 
   function findEl(selectorList) {
@@ -206,27 +220,55 @@
     });
   }
 
-  function tileIsFailed(tile) {
+  function hasVisibleText(tile, matcher) {
     if (!tile) return false;
 
-    const text = tile.textContent?.toLowerCase() || "";
+    return Array.from(tile.querySelectorAll("*")).some((el) => {
+      if (!isVisible(el)) return false;
 
-    return text.includes("failed");
+      const text = el.textContent?.trim().toLowerCase() || "";
+
+      return matcher(text, el);
+    });
+  }
+
+  function getOwnText(el) {
+    return Array.from(el.childNodes)
+      .filter((node) => node.nodeType === Node.TEXT_NODE)
+      .map((node) => node.textContent.trim().toLowerCase())
+      .filter(Boolean)
+      .join(" ");
+  }
+
+  function tileIsFailed(tile) {
+    if (!tile || !isVisible(tile)) return false;
+
+    return hasVisibleText(tile, (_text, el) => {
+      const ownText = getOwnText(el);
+
+      return ownText === "failed";
+    });
   }
 
   function tileLooksCompleted(tile) {
     if (!tile || !isVisible(tile)) return false;
 
-    const text = tile.textContent?.toLowerCase() || "";
-
     if (tileHasProgress(tile)) return false;
-    if (text.includes("failed")) return false;
+    if (tileIsFailed(tile)) return false;
 
-    const hasImage = Boolean(tile.querySelector("img, canvas, video"));
-    const hasReusePrompt = text.includes("reuse prompt");
-    const hasDelete = text.includes("delete");
+    const hasVisibleMedia = Array.from(
+      tile.querySelectorAll("img, canvas, video"),
+    ).some(isVisible);
 
-    return hasImage || hasReusePrompt || hasDelete;
+    const hasVisibleReusePrompt = hasVisibleText(tile, (text) =>
+      text.includes("reuse prompt"),
+    );
+
+    const hasVisibleDelete = hasVisibleText(tile, (text) =>
+      text.includes("delete"),
+    );
+
+    return hasVisibleMedia || hasVisibleReusePrompt || hasVisibleDelete;
   }
 
   // ─── DRAGGING ─────────────────────────────────────────────────
@@ -667,6 +709,11 @@
         latestNewTile = newTiles[newTiles.length - 1];
       }
 
+      /**
+       * If we can see a percentage like 37%, the generation is definitely active.
+       * Do NOT check for failed state while progress is visible.
+       * Flow may keep hidden/stale "Failed" DOM inside the same tile.
+       */
       if (progressVisible) {
         sawGenerationStart = true;
         stableCompletedChecks = 0;
@@ -678,8 +725,38 @@
             ? `Generating… ${progressValue}%`
             : "Generating…",
         );
+
+        await sleep(POLL_INTERVAL);
+        continue;
       }
 
+      /**
+       * Same protection, but scoped to the latest tile.
+       * Even if global progress detection misses it, if this tile has "37%",
+       * we should treat it as still generating and skip failure checks.
+       */
+      if (latestNewTile && tileHasProgress(latestNewTile)) {
+        sawGenerationStart = true;
+        stableCompletedChecks = 0;
+
+        const tileProgressText = Array.from(
+          latestNewTile.querySelectorAll("div"),
+        )
+          .map((el) => el.textContent?.trim() || "")
+          .find((text) => /^\d{1,3}%$/.test(text));
+
+        setStatus(
+          "",
+          tileProgressText ? `Generating… ${tileProgressText}` : "Generating…",
+        );
+
+        await sleep(POLL_INTERVAL);
+        continue;
+      }
+
+      /**
+       * Only check failed after there is no visible progress anymore.
+       */
       if (latestNewTile && tileIsFailed(latestNewTile)) {
         console.warn("[Flow Queue] Generation failed:", {
           tileText: latestNewTile.textContent?.trim(),
@@ -692,18 +769,16 @@
       if (
         sawGenerationStart &&
         latestNewTile &&
-        !progressVisible &&
         tileLooksCompleted(latestNewTile)
       ) {
         stableCompletedChecks += 1;
 
         setStatus("", "Generation completed, confirming card is stable…");
 
-        // Two stable checks avoids moving forward during a tiny DOM transition.
         if (stableCompletedChecks >= 2) {
           return "done";
         }
-      } else if (sawGenerationStart && latestNewTile && !progressVisible) {
+      } else if (sawGenerationStart && latestNewTile) {
         stableCompletedChecks = 0;
         setStatus("", "Generation finishing… waiting for card to settle");
       }
