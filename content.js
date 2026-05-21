@@ -23,6 +23,7 @@
 
   const POLL_INTERVAL = 1500;
   const MAX_WAIT_MS = 180000; // 3 min max per prompt
+  const DOCK_WIDTH_PX = 360;
 
   // ─── STATE ────────────────────────────────────────────────────
   let queue = [];
@@ -30,6 +31,8 @@
   let stopFlag = false;
   let delayBetween = 25;
   let downloadFolder = "flow-images";
+  let referenceImage = null;
+  let referenceAssetSearchText = "";
   let idCounter = 0;
 
   // ─── PANEL BUILD ──────────────────────────────────────────────
@@ -50,6 +53,12 @@
     <div id="fpq-body">
       <div id="fpq-input-area">
         <textarea id="fpq-textarea" placeholder="Type a prompt… one prompt per line" rows="3"></textarea>
+        <div id="fpq-reference-drop" tabindex="0" role="button">
+          <span id="fpq-reference-text">choose reference image</span>
+          <span id="fpq-reference-name">none</span>
+          <button id="fpq-reference-clear" type="button" title="Remove reference image">×</button>
+          <input id="fpq-reference-input" type="file" accept="image/*" />
+        </div>
         <div id="fpq-folder-row">
           <span id="fpq-folder-label">download folder</span>
           <input id="fpq-folder-input" type="text" value="flow-images" placeholder="flow-images" />
@@ -76,12 +85,22 @@
       <div id="fpq-status-bar">Ready</div>
     </div>
   `;
+  document.documentElement.style.setProperty(
+    "--fpq-dock-width",
+    `${DOCK_WIDTH_PX}px`,
+  );
+  document.documentElement.classList.add("fpq-docked");
   document.body.appendChild(root);
 
   // ─── ELEMENT REFS ─────────────────────────────────────────────
   const $ = (id) => root.querySelector("#" + id);
 
   const textarea = $("fpq-textarea");
+  const referenceDrop = $("fpq-reference-drop");
+  const referenceText = $("fpq-reference-text");
+  const referenceName = $("fpq-reference-name");
+  const referenceClear = $("fpq-reference-clear");
+  const referenceInput = $("fpq-reference-input");
   const delayInput = $("fpq-delay-input");
   const folderInput = $("fpq-folder-input");
   const addBtn = $("fpq-add-btn");
@@ -139,6 +158,59 @@
         .replace(/^-+|-+$/g, "") || "flow-image";
 
     return `${safeFolder}/${safeFilename}`;
+  }
+
+  function fileToDataUrl(file) {
+    return new Promise((resolve, reject) => {
+      const reader = new FileReader();
+
+      reader.onload = () => resolve(reader.result);
+      reader.onerror = () => reject(reader.error);
+      reader.readAsDataURL(file);
+    });
+  }
+
+  function dataUrlToFile(dataUrl, name, type) {
+    const [header, base64] = String(dataUrl || "").split(",");
+    const mime = type || header.match(/data:([^;]+)/)?.[1] || "image/png";
+    const binary = atob(base64 || "");
+    const bytes = new Uint8Array(binary.length);
+
+    for (let i = 0; i < binary.length; i++) {
+      bytes[i] = binary.charCodeAt(i);
+    }
+
+    return new File([bytes], name || "reference-image.png", { type: mime });
+  }
+
+  function updateReferenceImageUi() {
+    if (!referenceImage) {
+      referenceDrop.classList.remove("has-image");
+      referenceText.textContent = "choose reference image";
+      referenceName.textContent = "none";
+      return;
+    }
+
+    referenceDrop.classList.add("has-image");
+    referenceText.textContent = "reference image";
+    referenceName.textContent = referenceImage.name;
+  }
+
+  async function setReferenceImageFromFile(file) {
+    if (!file?.type?.startsWith("image/")) {
+      setStatus("warn", "Choose an image file to use as reference");
+      return;
+    }
+
+    referenceImage = {
+      dataUrl: await fileToDataUrl(file),
+      name: file.name || "reference-image.png",
+      type: file.type || "image/png",
+    };
+    referenceAssetSearchText = "";
+
+    updateReferenceImageUi();
+    setStatus("ok", `Reference image set: ${referenceImage.name}`);
   }
 
   function setStatus(type, msg) {
@@ -320,6 +392,17 @@
     return (el?.textContent || "").replace(/\s+/g, " ").trim();
   }
 
+  function setNativeInputValue(input, value) {
+    const descriptor = Object.getOwnPropertyDescriptor(
+      HTMLInputElement.prototype,
+      "value",
+    );
+
+    descriptor?.set?.call(input, value);
+    input.dispatchEvent(new Event("input", { bubbles: true }));
+    input.dispatchEvent(new Event("change", { bubbles: true }));
+  }
+
   function getElementCenter(el) {
     const rect = el.getBoundingClientRect();
 
@@ -337,21 +420,94 @@
     return Math.hypot(ac.x - bc.x, ac.y - bc.y);
   }
 
+  function getPromptEditorClickTarget(editor) {
+    if (!editor) return null;
+
+    const targetLooksClickable = (el) => {
+      if (!el || el === editor) return false;
+
+      const rect = el.getBoundingClientRect();
+
+      if (rect.height <= 0) return false;
+
+      const style = window.getComputedStyle(el);
+
+      return (
+        style.display !== "none" &&
+        style.visibility !== "hidden" &&
+        style.opacity !== "0"
+      );
+    };
+
+    return Array.from(
+      editor.querySelectorAll(
+        [
+          '[data-slate-string="true"]',
+          "[data-slate-zero-width]",
+          '[data-slate-leaf="true"]',
+          '[data-slate-node="text"]',
+        ].join(", "),
+      ),
+    )
+      .reverse()
+      .find(targetLooksClickable);
+  }
+
+  async function focusSlateEditor(editor, label = "prompt editor") {
+    if (!editor) return false;
+
+    editor.scrollIntoView({
+      block: "center",
+      inline: "center",
+    });
+
+    await sleep(300);
+
+    const clickTarget = getPromptEditorClickTarget(editor);
+
+    if (clickTarget) {
+      const rect = clickTarget.getBoundingClientRect();
+
+      if (rect.width > 0) {
+        await realClickElement(clickTarget, label);
+      } else {
+        editor.focus({ preventScroll: true });
+      }
+    } else {
+      editor.focus({ preventScroll: true });
+    }
+
+    await sleep(500);
+
+    return (
+      document.activeElement === editor ||
+      editor.contains(document.activeElement)
+    );
+  }
+
+  async function realClickPromptEditor(editor, label = "prompt editor") {
+    const clickTarget = getPromptEditorClickTarget(editor);
+
+    if (!clickTarget) {
+      editor?.focus?.({ preventScroll: true });
+      return false;
+    }
+
+    return realClickElement(clickTarget, label);
+  }
+
   function findBestCardContainer(tile) {
     if (!tile) return null;
 
-    const byKnownCardClass = tile.closest(".sc-1046f06c-0");
-
-    if (byKnownCardClass) return byKnownCardClass;
-
+    // Best stable anchor: generated tiles already have data-tile-id.
     const byTileId = tile.closest("[data-tile-id]");
-
     if (byTileId) return byTileId;
 
+    // Fallback: climb up until we find a visible parent that looks like a card.
     let current = tile;
     let best = tile;
 
-    for (let i = 0; i < 8 && current?.parentElement; i++) {
+    for (let i = 0; i < 10 && current?.parentElement; i++) {
       current = current.parentElement;
 
       if (!isVisible(current)) continue;
@@ -359,7 +515,19 @@
       const rect = current.getBoundingClientRect();
       const bestRect = best.getBoundingClientRect();
 
-      if (rect.width * rect.height > bestRect.width * bestRect.height) {
+      const area = rect.width * rect.height;
+      const bestArea = bestRect.width * bestRect.height;
+
+      const hasMedia = current.querySelector("img, canvas, video");
+      const hasButtons = current.querySelector("button, [role='button']");
+
+      // Prefer a parent that contains media + buttons and has a card-like size.
+      if (
+        area > bestArea &&
+        rect.width >= 160 &&
+        rect.height >= 160 &&
+        (hasMedia || hasButtons)
+      ) {
         best = current;
       }
     }
@@ -368,14 +536,18 @@
   }
 
   function buttonLooksLikeMore(btn) {
-    const iconText = btn.querySelector("i")?.textContent?.trim();
+    if (!btn || !isVisible(btn)) return false;
+
+    const iconTexts = Array.from(btn.querySelectorAll("i"))
+      .map((icon) => icon.textContent?.trim())
+      .filter(Boolean);
 
     if (
-      iconText === "more_vert" ||
-      iconText === "more_horiz" ||
-      iconText === "more" ||
-      iconText === "kebab_vertical" ||
-      iconText === "overflow"
+      iconTexts.includes("more_vert") ||
+      iconTexts.includes("more_horiz") ||
+      iconTexts.includes("more") ||
+      iconTexts.includes("kebab_vertical") ||
+      iconTexts.includes("overflow")
     ) {
       return true;
     }
@@ -395,6 +567,80 @@
       label.includes("menu") ||
       label.includes("actions")
     );
+  }
+
+  function getRectDistance(a, b) {
+    const ar = a.getBoundingClientRect();
+    const br = b.getBoundingClientRect();
+
+    const ax = ar.left + ar.width / 2;
+    const ay = ar.top + ar.height / 2;
+    const bx = br.left + br.width / 2;
+    const by = br.top + br.height / 2;
+
+    return Math.hypot(ax - bx, ay - by);
+  }
+
+  function findTileMoreButton(tile) {
+    if (!tile) return null;
+
+    const card = findBestCardContainer(tile);
+
+    if (!card) return null;
+
+    // 1. First try buttons inside the card.
+    const localButtons = Array.from(
+      card.querySelectorAll("button, [role='button']"),
+    ).filter(isVisible);
+
+    const localMoreButton = localButtons.find(buttonLooksLikeMore);
+
+    if (localMoreButton) {
+      return localMoreButton;
+    }
+
+    // 2. If no obvious "more" button, choose the top-right visible button inside the card.
+    // This is usually where Flow puts the menu button.
+    const cardRect = card.getBoundingClientRect();
+
+    const topRightLocalButton = localButtons
+      .map((btn) => {
+        const rect = btn.getBoundingClientRect();
+
+        const distanceFromTopRight = Math.hypot(
+          rect.left + rect.width / 2 - cardRect.right,
+          rect.top + rect.height / 2 - cardRect.top,
+        );
+
+        return {
+          btn,
+          distanceFromTopRight,
+        };
+      })
+      .sort((a, b) => a.distanceFromTopRight - b.distanceFromTopRight)[0]?.btn;
+
+    if (topRightLocalButton) {
+      return topRightLocalButton;
+    }
+
+    // 3. Last fallback: search all visible menu-like buttons globally
+    // and pick the one closest to the generated card.
+    const globalMoreButtons = Array.from(
+      document.querySelectorAll("button, [role='button']"),
+    )
+      .filter((btn) => isVisible(btn))
+      .filter((btn) => !btn.closest("#fpq-root"))
+      .filter(buttonLooksLikeMore);
+
+    if (!globalMoreButtons.length) {
+      return null;
+    }
+
+    globalMoreButtons.sort(
+      (a, b) => getRectDistance(a, card) - getRectDistance(b, card),
+    );
+
+    return globalMoreButtons[0];
   }
 
   function makeFilenameFromPrompt(index, prompt) {
@@ -433,6 +679,65 @@
               "[Flow Queue] Could not set next download filename:",
               response,
             );
+            resolve(false);
+            return;
+          }
+
+          resolve(true);
+        },
+      );
+    });
+  }
+
+  async function insertTextWithDebugger(text) {
+    return new Promise((resolve) => {
+      chrome.runtime.sendMessage(
+        {
+          type: "FPQ_INSERT_TEXT",
+          text,
+        },
+        (response) => {
+          if (chrome.runtime.lastError) {
+            console.warn(
+              "[Flow Queue] Debugger insert failed:",
+              chrome.runtime.lastError.message,
+            );
+
+            resolve(false);
+            return;
+          }
+
+          if (!response?.ok) {
+            console.warn("[Flow Queue] Debugger insert failed:", response);
+            resolve(false);
+            return;
+          }
+
+          resolve(true);
+        },
+      );
+    });
+  }
+
+  async function clearTextWithDebugger() {
+    return new Promise((resolve) => {
+      chrome.runtime.sendMessage(
+        {
+          type: "FPQ_CLEAR_TEXT",
+        },
+        (response) => {
+          if (chrome.runtime.lastError) {
+            console.warn(
+              "[Flow Queue] Debugger clear failed:",
+              chrome.runtime.lastError.message,
+            );
+
+            resolve(false);
+            return;
+          }
+
+          if (!response?.ok) {
+            console.warn("[Flow Queue] Debugger clear failed:", response);
             resolve(false);
             return;
           }
@@ -875,6 +1180,23 @@
 
     setStatus("", "Opening card menu to download…");
 
+    console.log("[Flow Queue] Card selected for download:", card);
+    console.log(
+      "[Flow Queue] Candidate buttons inside card:",
+      Array.from(card.querySelectorAll("button, [role='button']")).map(
+        (btn) => ({
+          text: btn.textContent?.trim(),
+          ariaLabel: btn.getAttribute("aria-label"),
+          title: btn.getAttribute("title"),
+          icon: Array.from(btn.querySelectorAll("i"))
+            .map((i) => i.textContent?.trim())
+            .filter(Boolean),
+          visible: isVisible(btn),
+          rect: btn.getBoundingClientRect(),
+        }),
+      ),
+    );
+
     let moreButton = findTileMoreButton(card);
 
     if (!moreButton) {
@@ -955,12 +1277,522 @@
     return true;
   }
 
+  function getGeneratedAssetSearchText(tile) {
+    const imgAlt = tile?.querySelector("img[alt]")?.getAttribute("alt") || "";
+    const visibleText = getVisibleText(tile);
+
+    return (imgAlt || visibleText).replace(/\s+/g, " ").trim().slice(0, 80);
+  }
+
+  function normalizeAssetName(value) {
+    return String(value || "")
+      .toLowerCase()
+      .normalize("NFD")
+      .replace(/[\u0300-\u036f]/g, "")
+      .replace(/\.[a-z0-9]+$/i, "")
+      .replace(/[^a-z0-9]+/g, " ")
+      .trim();
+  }
+
+  function findCreateAssetButton() {
+    return Array.from(document.querySelectorAll("button")).find((btn) => {
+      if (!isVisible(btn)) return false;
+
+      const text = getVisibleText(btn).toLowerCase();
+      const iconText = btn.querySelector("i")?.textContent?.trim();
+
+      return iconText === "add_2" || text === "create";
+    });
+  }
+
+  async function waitForAssetDialog(timeout = 8000) {
+    const started = Date.now();
+
+    while (Date.now() - started < timeout) {
+      const searchInput = document.querySelector("#quick-search-input");
+      const dialog = searchInput?.closest('[role="dialog"]');
+
+      if (dialog && isVisible(dialog)) {
+        return dialog;
+      }
+
+      await sleep(300);
+    }
+
+    return null;
+  }
+
+  async function waitForAssetDialogClosed(timeout = 6000) {
+    const started = Date.now();
+
+    while (Date.now() - started < timeout) {
+      const searchInput = document.querySelector("#quick-search-input");
+      const dialog = searchInput?.closest('[role="dialog"]');
+
+      if (!dialog || !isVisible(dialog)) {
+        return true;
+      }
+
+      await sleep(300);
+    }
+
+    return false;
+  }
+
+  function getAssetOptions(dialog) {
+    const list =
+      dialog.querySelector('[data-testid="virtuoso-item-list"]') || dialog;
+
+    return Array.from(list.querySelectorAll('[role="option"]')).filter(
+      (option) => isVisible(option),
+    );
+  }
+
+  function findAssetOption(dialog, searchText = "") {
+    const options = getAssetOptions(dialog).filter((option) =>
+      getVisibleText(option).toLowerCase().includes("image"),
+    );
+
+    const normalizedSearch = normalizeAssetName(searchText);
+
+    if (normalizedSearch) {
+      const matchingOption = options.find((option) => {
+        const text = normalizeAssetName(getVisibleText(option));
+        const imgAlt = normalizeAssetName(
+          option.querySelector("img[alt]")?.getAttribute("alt") || "",
+        );
+
+        return (
+          text.includes(normalizedSearch) ||
+          normalizedSearch.includes(text) ||
+          (imgAlt &&
+            (imgAlt.includes(normalizedSearch) ||
+              normalizedSearch.includes(imgAlt)))
+        );
+      });
+
+      if (matchingOption) return matchingOption;
+    }
+
+    return options[0] || null;
+  }
+
+  function findMatchingAssetOption(dialog, searchText = "") {
+    const options = getAssetOptions(dialog).filter((option) =>
+      getVisibleText(option).toLowerCase().includes("image"),
+    );
+    const normalizedSearch = normalizeAssetName(searchText);
+
+    if (!normalizedSearch) return null;
+
+    return (
+      options.find((option) => {
+        const text = normalizeAssetName(getVisibleText(option));
+        const imgAlt = normalizeAssetName(
+          option.querySelector("img[alt]")?.getAttribute("alt") || "",
+        );
+
+        return (
+          text.includes(normalizedSearch) ||
+          normalizedSearch.includes(text) ||
+          (imgAlt &&
+            (imgAlt.includes(normalizedSearch) ||
+              normalizedSearch.includes(imgAlt)))
+        );
+      }) || null
+    );
+  }
+
+  async function waitForMatchingAssetOption(
+    dialog,
+    searchText = "",
+    timeout = 5000,
+  ) {
+    const searchInput = dialog.querySelector("#quick-search-input");
+    const started = Date.now();
+
+    if (searchText && searchInput) {
+      searchInput.focus();
+      setNativeInputValue(searchInput, searchText);
+    }
+
+    while (Date.now() - started < timeout) {
+      const option = searchText
+        ? findMatchingAssetOption(dialog, searchText)
+        : findAssetOption(dialog, searchText);
+
+      if (option) return option;
+
+      await sleep(300);
+    }
+
+    return null;
+  }
+
+  async function openAssetDialog() {
+    const createButton = findCreateAssetButton();
+
+    if (!createButton) {
+      console.warn("[Flow Queue] Create asset button not found");
+      setStatus("err", "Create button not found");
+      return null;
+    }
+
+    setStatus("", "Opening assets picker...");
+    await realClickElement(createButton, "Create asset button");
+
+    const dialog = await waitForAssetDialog();
+
+    if (!dialog) {
+      setStatus("err", "Assets picker did not open");
+      return null;
+    }
+
+    const imagesTab = Array.from(dialog.querySelectorAll('[role="tab"]')).find(
+      (tab) => getVisibleText(tab).toLowerCase().includes("images"),
+    );
+
+    if (imagesTab && imagesTab.getAttribute("aria-selected") !== "true") {
+      await realClickElement(imagesTab, "Images tab");
+      await sleep(800);
+    }
+
+    return dialog;
+  }
+
+  async function closeAssetDialog(dialog) {
+    try {
+      document.dispatchEvent(
+        new KeyboardEvent("keydown", {
+          key: "Escape",
+          code: "Escape",
+          keyCode: 27,
+          which: 27,
+          bubbles: true,
+          cancelable: true,
+        }),
+      );
+      await sleep(500);
+    } catch (err) {
+      console.warn("[Flow Queue] Could not close assets picker:", err);
+    }
+  }
+
+  async function findReferenceImageInAssets() {
+    if (!referenceImage?.name) return "";
+
+    const dialog = await openAssetDialog();
+
+    if (!dialog) return "";
+
+    const option = await waitForMatchingAssetOption(
+      dialog,
+      referenceImage.name,
+      7000,
+    );
+    const matchedText = option ? getVisibleText(option) : "";
+
+    await closeAssetDialog(dialog);
+
+    if (!option) return "";
+
+    return matchedText || referenceImage.name;
+  }
+
+  async function waitForAddToPromptButton(dialog, timeout = 5000) {
+    const started = Date.now();
+
+    while (Date.now() - started < timeout) {
+      const addButton = Array.from(dialog.querySelectorAll("button")).find(
+        (btn) => {
+          const text = getVisibleText(btn).toLowerCase();
+
+          return (
+            isVisible(btn) &&
+            !btn.disabled &&
+            btn.getAttribute("aria-disabled") !== "true" &&
+            text.trim() === "add to prompt"
+          );
+        },
+      );
+
+      if (addButton) return addButton;
+
+      await sleep(300);
+    }
+
+    return null;
+  }
+
+  async function selectAssetOption(option, dialog, searchText = "") {
+    const started = Date.now();
+    const timeout = 5000;
+
+    while (Date.now() - started < timeout) {
+      if (!option?.isConnected || !isVisible(option)) {
+        option = searchText
+          ? findMatchingAssetOption(dialog, searchText)
+          : findAssetOption(dialog);
+      }
+
+      if (!option) {
+        await sleep(300);
+        continue;
+      }
+
+      const existingAddButton = await waitForAddToPromptButton(dialog, 200);
+
+      if (
+        option.getAttribute("aria-selected") === "true" &&
+        existingAddButton
+      ) {
+        return true;
+      }
+
+      option.scrollIntoView({
+        block: "center",
+        inline: "center",
+      });
+
+      await sleep(250);
+
+      if (!option.isConnected || !isVisible(option)) {
+        option = searchText
+          ? findMatchingAssetOption(dialog, searchText)
+          : findAssetOption(dialog);
+        continue;
+      }
+
+      const clickTarget =
+        option.querySelector(".sc-149a23e6-14") ||
+        option.querySelector("img[alt]") ||
+        option;
+
+      clickTarget.dispatchEvent(
+        new PointerEvent("pointerdown", {
+          bubbles: true,
+          cancelable: true,
+          view: window,
+          pointerType: "mouse",
+        }),
+      );
+      clickTarget.dispatchEvent(
+        new MouseEvent("mousedown", {
+          bubbles: true,
+          cancelable: true,
+          view: window,
+        }),
+      );
+      clickTarget.click();
+      clickTarget.dispatchEvent(
+        new MouseEvent("mouseup", {
+          bubbles: true,
+          cancelable: true,
+          view: window,
+        }),
+      );
+      clickTarget.dispatchEvent(
+        new MouseEvent("click", {
+          bubbles: true,
+          cancelable: true,
+          view: window,
+        }),
+      );
+
+      await realClickElement(clickTarget, "Generated image asset");
+      await sleep(500);
+
+      if (
+        option.getAttribute("aria-selected") === "true" ||
+        (await waitForAddToPromptButton(dialog, 600))
+      ) {
+        return true;
+      }
+    }
+
+    return false;
+  }
+
+  async function clickAddToPromptButton(addButton) {
+    addButton.scrollIntoView({
+      block: "center",
+      inline: "center",
+    });
+
+    await sleep(250);
+    addButton.click();
+    await sleep(500);
+
+    if (await waitForAssetDialogClosed(1200)) {
+      return true;
+    }
+
+    await realClickElement(addButton, "Add to Prompt button");
+
+    return waitForAssetDialogClosed(5000);
+  }
+
+  function getPromptComposerRoot() {
+    const editor = findEl(SELECTORS.promptInput);
+
+    return (
+      editor?.closest(".sc-439ac1d3-0") ||
+      editor?.closest("form") ||
+      editor?.parentElement ||
+      document
+    );
+  }
+
+  function getPromptAttachedMediaElements() {
+    const promptRoot = getPromptComposerRoot();
+
+    return Array.from(
+      promptRoot.querySelectorAll(
+        [
+          'button[data-card-open] img[alt*="present in your collection" i]',
+          'button[data-card-open] img[src*="media.getMediaUrlRedirect"]',
+          'button[data-card-open="false"] img',
+        ].join(", "),
+      ),
+    ).filter(isVisible);
+  }
+
+  function getPromptAttachedMediaCount() {
+    return getPromptAttachedMediaElements().length;
+  }
+
+  function promptHasAttachedMedia() {
+    return getPromptAttachedMediaCount() > 0;
+  }
+
+  async function waitForPromptAttachedMedia(timeout = 8000, previousCount = 0) {
+    const started = Date.now();
+
+    while (Date.now() - started < timeout) {
+      const attachedCount = getPromptAttachedMediaCount();
+
+      if (attachedCount > previousCount) {
+        return true;
+      }
+
+      await sleep(300);
+    }
+
+    return false;
+  }
+
+  async function addGeneratedAssetToPrompt(tile = null, searchOverride = "") {
+    const previousAttachedCount = getPromptAttachedMediaCount();
+    const dialog = await openAssetDialog();
+
+    if (!dialog) {
+      return false;
+    }
+
+    const searchText = searchOverride || getGeneratedAssetSearchText(tile);
+    const searchInput = dialog.querySelector("#quick-search-input");
+    let option = searchText
+      ? findMatchingAssetOption(dialog, searchText)
+      : findAssetOption(dialog);
+
+    if (!option && searchText) {
+      option = await waitForMatchingAssetOption(dialog, searchText, 7000);
+    }
+
+    if (!option && searchInput) {
+      setNativeInputValue(searchInput, "");
+      await sleep(1200);
+      option = findAssetOption(dialog, searchText);
+    }
+
+    if (!option) {
+      setStatus("err", "Generated image not found in assets");
+      return false;
+    }
+
+    const selected = await selectAssetOption(option, dialog, searchText);
+
+    if (!selected) {
+      setStatus("err", "Could not select generated image asset");
+      return false;
+    }
+
+    const addButton = await waitForAddToPromptButton(dialog);
+
+    if (!addButton) {
+      setStatus("err", "Add to Prompt button not found");
+      return false;
+    }
+
+    const added = await clickAddToPromptButton(addButton);
+
+    if (!added) {
+      setStatus("err", "Asset was not added to prompt");
+      return false;
+    }
+
+    const attached = await waitForPromptAttachedMedia(
+      10000,
+      previousAttachedCount,
+    );
+
+    if (!attached) {
+      setStatus("err", "Asset thumbnail did not appear in prompt");
+      return false;
+    }
+
+    await sleep(800);
+
+    return true;
+  }
+
+  async function addPromptTextToCurrentPrompt(text) {
+    let editor = findEl(SELECTORS.promptInput);
+
+    if (!editor) {
+      await sleep(1000);
+      editor = findEl(SELECTORS.promptInput);
+
+      if (!editor) {
+        setStatus("err", "Prompt editor not found");
+        return false;
+      }
+    }
+
+    await focusPromptEditor(editor);
+
+    const inserted = await insertPromptTextIntoEditor(editor, text);
+
+    if (!inserted) {
+      setStatus("err", "Could not insert prompt after adding asset");
+      return false;
+    }
+
+    await sleep(900);
+    editor.dispatchEvent(new Event("input", { bubbles: true }));
+    editor.dispatchEvent(new Event("change", { bubbles: true }));
+
+    const currentText = (editor.innerText || editor.textContent || "").trim();
+
+    if (!currentText.includes(text.slice(0, Math.min(30, text.length)))) {
+      const submitBtn = await waitForSubmitButton(2000);
+
+      if (!submitBtn) {
+        setStatus("err", "Prompt text was not added after asset selection");
+        return false;
+      }
+    }
+
+    return true;
+  }
+
   // ─── DRAGGING ─────────────────────────────────────────────────
   let dragging = false;
   let dragOffX = 0;
   let dragOffY = 0;
 
   $("fpq-header").addEventListener("mousedown", (e) => {
+    if (document.documentElement.classList.contains("fpq-docked")) return;
     if (e.target.closest(".fpq-icon-btn")) return;
 
     dragging = true;
@@ -988,14 +1820,60 @@
   // ─── COLLAPSE / CLOSE ─────────────────────────────────────────
   collapseBtn.addEventListener("click", () => {
     root.classList.toggle("fpq-collapsed");
+    const isCollapsed = root.classList.contains("fpq-collapsed");
 
-    collapseBtn.textContent = root.classList.contains("fpq-collapsed")
-      ? "▼"
-      : "▲";
+    if (!isCollapsed) {
+      root.style.left = "";
+      root.style.top = "";
+      root.style.right = "";
+    }
+
+    document.documentElement.classList.toggle("fpq-docked", !isCollapsed);
+
+    collapseBtn.textContent = isCollapsed ? "▼" : "▲";
   });
 
   closeBtn.addEventListener("click", () => {
+    document.documentElement.classList.remove("fpq-docked");
+    document.documentElement.style.removeProperty("--fpq-dock-width");
     root.remove();
+  });
+
+  // ─── REFERENCE IMAGE ──────────────────────────────────────────
+  referenceDrop.addEventListener("click", (e) => {
+    if (e.target === referenceClear || e.target === referenceInput) return;
+    referenceInput.click();
+  });
+
+  referenceDrop.addEventListener("keydown", (e) => {
+    if (e.key !== "Enter" && e.key !== " ") return;
+
+    e.preventDefault();
+    referenceInput.click();
+  });
+
+  referenceInput.addEventListener("change", async () => {
+    const file = Array.from(referenceInput.files || []).find((item) =>
+      item.type?.startsWith("image/"),
+    );
+
+    await setReferenceImageFromFile(file);
+    referenceInput.value = "";
+  });
+
+  ["dragenter", "dragover", "dragleave", "drop"].forEach((eventName) => {
+    referenceDrop.addEventListener(eventName, (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+    });
+  });
+
+  referenceClear.addEventListener("click", (e) => {
+    e.stopPropagation();
+    referenceImage = null;
+    referenceAssetSearchText = "";
+    updateReferenceImageUi();
+    setStatus("", "Reference image removed");
   });
 
   // ─── ADD PROMPTS ──────────────────────────────────────────────
@@ -1091,7 +1969,166 @@
   }
 
   // ─── FIND SUBMIT BUTTON ───────────────────────────────────────
+  function buttonIsEnabled(btn) {
+    return (
+      btn &&
+      isVisible(btn) &&
+      !btn.disabled &&
+      btn.getAttribute("aria-disabled") !== "true"
+    );
+  }
+
+  function buttonIsInDialog(btn) {
+    return Boolean(
+      btn.closest('[role="dialog"], [data-radix-popper-content-wrapper]'),
+    );
+  }
+
+  function buttonHasSubmitIcon(btn) {
+    const iconText = btn.querySelector("i")?.textContent?.trim();
+
+    return ["arrow_forward", "send", "arrow_upward"].includes(iconText);
+  }
+
+  function buttonHasIcon(btn, iconName) {
+    return Array.from(btn.querySelectorAll("i")).some(
+      (icon) => icon.textContent?.trim() === iconName,
+    );
+  }
+
+  function buttonLooksLikeAssetCreate(btn) {
+    return (
+      buttonHasIcon(btn, "add_2") ||
+      btn.getAttribute("aria-haspopup") === "dialog"
+    );
+  }
+
+  function buttonLooksLikeSubmit(btn) {
+    const label = [
+      btn.getAttribute("aria-label"),
+      btn.getAttribute("title"),
+      btn.textContent,
+    ]
+      .filter(Boolean)
+      .join(" ")
+      .toLowerCase();
+
+    return (
+      label.trim() === "create" ||
+      label.includes("create") ||
+      label.includes("submit") ||
+      label.includes("generate") ||
+      label.includes("send") ||
+      buttonHasSubmitIcon(btn)
+    );
+  }
+
+  function findDirectCreateSubmitButton(root = document) {
+    const buttons = Array.from(
+      root.querySelectorAll('button[aria-disabled="false"], button'),
+    )
+      .filter((btn) => buttonIsEnabled(btn) && !buttonIsInDialog(btn))
+      .filter((btn) => !btn.closest("#fpq-root"))
+      .filter((btn) => !buttonLooksLikeAssetCreate(btn));
+
+    const submitIconButton = buttons.find(buttonHasSubmitIcon);
+
+    if (submitIconButton) return submitIconButton;
+
+    return buttons.find((btn) => {
+      const text = [
+        btn.getAttribute("aria-label"),
+        btn.getAttribute("title"),
+        btn.textContent,
+      ]
+        .filter(Boolean)
+        .join(" ")
+        .toLowerCase();
+
+      return root !== document && text.includes("create");
+    });
+  }
+
+  function findExactComposerSubmitButton(root = document) {
+    return Array.from(
+      root.querySelectorAll(
+        'button.sc-439ac1d3-5, button[aria-disabled="false"]',
+      ),
+    )
+      .filter((btn) => buttonIsEnabled(btn) && !buttonIsInDialog(btn))
+      .filter((btn) => !btn.closest("#fpq-root"))
+      .filter((btn) => !buttonLooksLikeAssetCreate(btn))
+      .find(buttonHasSubmitIcon);
+  }
+
   function findSubmitBtn() {
+    const editor = findEl(SELECTORS.promptInput);
+    const promptRoot =
+      editor?.closest(".sc-439ac1d3-0") ||
+      editor?.closest("form") ||
+      editor?.parentElement;
+
+    const exactPromptButton = promptRoot
+      ? findExactComposerSubmitButton(promptRoot)
+      : null;
+
+    if (exactPromptButton) {
+      return exactPromptButton;
+    }
+
+    const directPromptButton = promptRoot
+      ? findDirectCreateSubmitButton(promptRoot)
+      : null;
+
+    if (directPromptButton) {
+      return directPromptButton;
+    }
+
+    const promptSubmitButton = promptRoot
+      ? Array.from(promptRoot.querySelectorAll("button"))
+          .filter((btn) => buttonIsEnabled(btn) && !btn.closest("#fpq-root"))
+          .filter((btn) => !buttonLooksLikeAssetCreate(btn))
+          .find(buttonLooksLikeSubmit)
+      : null;
+
+    if (promptSubmitButton) {
+      return promptSubmitButton;
+    }
+
+    const exactGlobalButton = findExactComposerSubmitButton();
+
+    if (exactGlobalButton) {
+      return exactGlobalButton;
+    }
+
+    const directGlobalButton = findDirectCreateSubmitButton();
+
+    if (directGlobalButton) {
+      return directGlobalButton;
+    }
+
+    const globalSubmitButton = Array.from(document.querySelectorAll("button"))
+      .filter((btn) => buttonIsEnabled(btn) && !buttonIsInDialog(btn))
+      .filter((btn) => !btn.closest("#fpq-root"))
+      .find((btn) => {
+        if (!buttonLooksLikeSubmit(btn)) return false;
+
+        const label = [
+          btn.getAttribute("aria-label"),
+          btn.getAttribute("title"),
+          btn.textContent,
+        ]
+          .filter(Boolean)
+          .join(" ")
+          .toLowerCase();
+
+        if (label.includes("create") && !buttonHasSubmitIcon(btn)) {
+          return Boolean(btn.closest("form") || btn.closest(".sc-439ac1d3-0"));
+        }
+
+        return true;
+      });
+
     const modelButton = Array.from(document.querySelectorAll("button")).find(
       (btn) => {
         if (!isVisible(btn)) return false;
@@ -1107,15 +2144,13 @@
     );
 
     if (!modelButton) {
-      console.warn("[Flow Queue] Model selector button not found");
-      return null;
+      return globalSubmitButton || null;
     }
 
     const parent = modelButton.parentElement;
 
     if (!parent) {
-      console.warn("[Flow Queue] Model selector parent not found");
-      return null;
+      return globalSubmitButton || null;
     }
 
     const siblingButtons = Array.from(
@@ -1124,18 +2159,12 @@
 
     const submitButton = siblingButtons.find((btn) => {
       if (btn === modelButton) return false;
-      if (!isVisible(btn)) return false;
-      if (btn.disabled) return false;
-      if (btn.getAttribute("aria-disabled") === "true") return false;
 
-      const iconText = btn.querySelector("i")?.textContent?.trim();
-
-      return iconText === "arrow_forward";
+      return buttonIsEnabled(btn) && buttonLooksLikeSubmit(btn);
     });
 
     if (!submitButton) {
-      console.warn("[Flow Queue] Submit button not found near model selector");
-      return null;
+      return globalSubmitButton || null;
     }
 
     return submitButton;
@@ -1162,13 +2191,44 @@
   }
 
   // ─── CLICK SUBMIT ─────────────────────────────────────────────
+  async function pressEnterToSubmit() {
+    return new Promise((resolve) => {
+      chrome.runtime.sendMessage(
+        {
+          type: "FPQ_PRESS_ENTER",
+        },
+        (response) => {
+          if (chrome.runtime.lastError) {
+            console.warn(
+              "[Flow Queue] Enter submit failed:",
+              chrome.runtime.lastError.message,
+            );
+
+            resolve(false);
+            return;
+          }
+
+          resolve(Boolean(response?.ok));
+        },
+      );
+    });
+  }
+
   async function clickSubmit() {
     const btn = await waitForSubmitButton(15000);
 
     if (!btn) {
       console.warn("[Flow Queue] Submit button not found or still disabled");
-      setStatus("err", "Submit button not found or disabled");
-      return false;
+
+      const editor = findEl(SELECTORS.promptInput);
+
+      if (editor) {
+        await focusPromptEditor(editor);
+      }
+
+      setStatus("warn", "Submit button not found, trying Enter...");
+
+      return pressEnterToSubmit();
     }
 
     btn.scrollIntoView({
@@ -1176,9 +2236,48 @@
       inline: "center",
     });
 
-    await sleep(700);
+    await sleep(300);
 
-    const rect = btn.getBoundingClientRect();
+    try {
+      btn.dispatchEvent(
+        new PointerEvent("pointerdown", {
+          bubbles: true,
+          cancelable: true,
+          view: window,
+          pointerType: "mouse",
+        }),
+      );
+      btn.dispatchEvent(
+        new MouseEvent("mousedown", {
+          bubbles: true,
+          cancelable: true,
+          view: window,
+        }),
+      );
+      btn.click();
+      btn.dispatchEvent(
+        new MouseEvent("mouseup", {
+          bubbles: true,
+          cancelable: true,
+          view: window,
+        }),
+      );
+      btn.dispatchEvent(
+        new MouseEvent("click", {
+          bubbles: true,
+          cancelable: true,
+          view: window,
+        }),
+      );
+    } catch (err) {
+      console.warn("[Flow Queue] DOM submit click failed:", err);
+    }
+
+    await sleep(500);
+
+    const submitIcon = btn.querySelector("i");
+    const clickTarget = submitIcon && isVisible(submitIcon) ? submitIcon : btn;
+    const rect = clickTarget.getBoundingClientRect();
 
     const x = Math.round(rect.left + rect.width / 2);
     const y = Math.round(rect.top + rect.height / 2);
@@ -1215,26 +2314,7 @@
     if (!clicked) {
       setStatus("warn", "Real click failed, trying Enter…");
 
-      const pressedEnter = await new Promise((resolve) => {
-        chrome.runtime.sendMessage(
-          {
-            type: "FPQ_PRESS_ENTER",
-          },
-          (response) => {
-            if (chrome.runtime.lastError) {
-              console.warn(
-                "[Flow Queue] Enter submit failed:",
-                chrome.runtime.lastError.message,
-              );
-
-              resolve(false);
-              return;
-            }
-
-            resolve(Boolean(response?.ok));
-          },
-        );
-      });
+      const pressedEnter = await pressEnterToSubmit();
 
       if (!pressedEnter) {
         setStatus("err", "Could not submit prompt");
@@ -1242,12 +2322,145 @@
       }
     }
 
+    await sleep(400);
+    await pressEnterToSubmit();
+
     await sleep(1200);
 
     return true;
   }
 
   // ─── INJECT PROMPT ────────────────────────────────────────────
+  async function focusPromptEditor(editor) {
+    return focusSlateEditor(editor, "prompt editor");
+  }
+
+  async function insertPromptTextIntoEditor(editor, text) {
+    await focusPromptEditor(editor);
+
+    const expected = text.slice(0, Math.min(30, text.length));
+    const hasText = () =>
+      (editor.innerText || editor.textContent || "").trim().includes(expected);
+
+    const inserted = await insertTextWithDebugger(text);
+
+    if (!inserted) {
+      return false;
+    }
+
+    await sleep(900);
+
+    if (hasText()) return true;
+
+    const submitBtn = await waitForSubmitButton(5000);
+
+    if (!submitBtn) {
+      console.warn(
+        "[Flow Queue] Prompt text not readable yet; continuing after debugger insert",
+      );
+    }
+
+    return true;
+  }
+
+  async function clearPromptEditor(editor) {
+    await focusPromptEditor(editor);
+
+    await clearTextWithDebugger();
+    await sleep(500);
+
+    editor.dispatchEvent(new Event("input", { bubbles: true }));
+  }
+
+  async function uploadReferenceImageForAsset() {
+    if (!referenceImage) return null;
+
+    const editor = findEl(SELECTORS.promptInput);
+
+    if (!editor) {
+      setStatus("err", "Prompt editor not found");
+      return null;
+    }
+
+    await clearPromptEditor(editor);
+
+    const file = dataUrlToFile(
+      referenceImage.dataUrl,
+      referenceImage.name,
+      referenceImage.type,
+    );
+
+    await focusPromptEditor(editor);
+    setStatus("", `Uploading reference image: ${referenceImage.name}`);
+
+    const previousTileIds = getGeneratedTileIds();
+    const fileInputs = Array.from(
+      document.querySelectorAll("input[type='file']"),
+    ).filter((input) => {
+      const accept = (input.getAttribute("accept") || "").toLowerCase();
+      return !accept || accept.includes("image") || accept.includes("*/*");
+    });
+
+    for (const input of fileInputs) {
+      try {
+        const transfer = new DataTransfer();
+
+        transfer.items.add(file);
+        input.files = transfer.files;
+        input.dispatchEvent(new Event("input", { bubbles: true }));
+        input.dispatchEvent(new Event("change", { bubbles: true }));
+
+        await sleep(1800);
+
+        if (
+          hasActiveGenerationProgress() ||
+          getNewGenerationTiles(previousTileIds).length
+        ) {
+          return previousTileIds;
+        }
+      } catch (err) {
+        console.warn("[Flow Queue] File input reference upload failed:", err);
+      }
+    }
+
+    const transfer = new DataTransfer();
+    transfer.items.add(file);
+
+    let pasteEvent;
+
+    try {
+      pasteEvent = new ClipboardEvent("paste", {
+        bubbles: true,
+        cancelable: true,
+        clipboardData: transfer,
+      });
+    } catch (_) {
+      pasteEvent = new Event("paste", {
+        bubbles: true,
+        cancelable: true,
+      });
+    }
+
+    if (!pasteEvent.clipboardData) {
+      Object.defineProperty(pasteEvent, "clipboardData", {
+        value: transfer,
+      });
+    }
+
+    editor.dispatchEvent(pasteEvent);
+    await sleep(1800);
+
+    if (
+      hasActiveGenerationProgress() ||
+      getNewGenerationTiles(previousTileIds).length
+    ) {
+      return previousTileIds;
+    }
+
+    setStatus("err", "Reference image upload did not start generation");
+    return null;
+  }
+
   async function injectPrompt(text) {
     const editor = findEl(SELECTORS.promptInput);
 
@@ -1264,83 +2477,170 @@
 
     const hasPrompt = () => getEditorText().includes(expected);
 
+    if (referenceImage && referenceAssetSearchText) {
+      await clearPromptEditor(editor);
+
+      const promptAdded = await insertPromptTextIntoEditor(editor, text);
+
+      if (!promptAdded) {
+        setStatus("err", "Prompt was not inserted into the editor");
+        return false;
+      }
+
+      await sleep(900);
+      editor.dispatchEvent(new Event("input", { bubbles: true }));
+      editor.dispatchEvent(new Event("change", { bubbles: true }));
+
+      const assetAdded = await addGeneratedAssetToPrompt(
+        null,
+        referenceAssetSearchText,
+      );
+
+      if (!assetAdded) {
+        return false;
+      }
+
+      return {
+        ok: true,
+        autoSubmitted: false,
+        previousTileIds: null,
+      };
+    }
+
+    if (referenceImage && !referenceAssetSearchText) {
+      setStatus("err", "Reference image asset is not ready yet");
+      return false;
+    }
+
     async function focusEditor() {
-      editor.scrollIntoView({
-        block: "center",
-        inline: "center",
-      });
-
-      await sleep(300);
-
-      editor.dispatchEvent(
-        new PointerEvent("pointerdown", {
-          bubbles: true,
-          cancelable: true,
-          view: window,
-        }),
-      );
-
-      editor.dispatchEvent(
-        new MouseEvent("mousedown", {
-          bubbles: true,
-          cancelable: true,
-          view: window,
-        }),
-      );
-
-      editor.focus();
-      editor.click();
-
-      await sleep(500);
+      return focusSlateEditor(editor, "prompt editor");
     }
 
     async function clearEditorWithRealKeys() {
       await focusEditor();
 
-      document.execCommand("selectAll", false, null);
-      await sleep(200);
-
-      document.execCommand("delete", false, null);
+      await clearTextWithDebugger();
       await sleep(500);
 
       editor.dispatchEvent(new Event("input", { bubbles: true }));
     }
 
-    async function insertTextWithDebugger() {
+    async function insertPromptText() {
+      return insertPromptTextIntoEditor(editor, text);
+    }
+
+    async function pasteReferenceImage() {
+      if (!referenceImage) {
+        return {
+          ok: true,
+          autoSubmitted: false,
+          previousTileIds: null,
+        };
+      }
+
+      const file = dataUrlToFile(
+        referenceImage.dataUrl,
+        referenceImage.name,
+        referenceImage.type,
+      );
+
       await focusEditor();
+      setStatus("", `Adding reference image: ${referenceImage.name}`);
 
-      return new Promise((resolve) => {
-        chrome.runtime.sendMessage(
-          {
-            type: "FPQ_INSERT_TEXT",
-            text,
-          },
-          (response) => {
-            if (chrome.runtime.lastError) {
-              console.warn(
-                "[Flow Queue] Debugger insert failed:",
-                chrome.runtime.lastError.message,
-              );
-
-              resolve(false);
-              return;
-            }
-
-            if (!response?.ok) {
-              console.warn("[Flow Queue] Debugger insert failed:", response);
-              resolve(false);
-              return;
-            }
-
-            resolve(true);
-          },
-        );
+      const previousTileIds = getGeneratedTileIds();
+      const fileInputs = Array.from(
+        document.querySelectorAll("input[type='file']"),
+      ).filter((input) => {
+        const accept = (input.getAttribute("accept") || "").toLowerCase();
+        return !accept || accept.includes("image") || accept.includes("*/*");
       });
+
+      for (const input of fileInputs) {
+        try {
+          const transfer = new DataTransfer();
+
+          transfer.items.add(file);
+          input.files = transfer.files;
+          input.dispatchEvent(new Event("input", { bubbles: true }));
+          input.dispatchEvent(new Event("change", { bubbles: true }));
+
+          await sleep(1800);
+
+          if (
+            hasActiveGenerationProgress() ||
+            getNewGenerationTiles(previousTileIds).length
+          ) {
+            console.warn(
+              "[Flow Queue] Reference file input triggered generation",
+            );
+            setStatus("", "Reference image triggered generation; tracking it");
+            return {
+              ok: true,
+              autoSubmitted: true,
+              previousTileIds,
+            };
+          }
+
+          return {
+            ok: true,
+            autoSubmitted: false,
+            previousTileIds: null,
+          };
+        } catch (err) {
+          console.warn("[Flow Queue] File input reference attach failed:", err);
+        }
+      }
+
+      const transfer = new DataTransfer();
+      transfer.items.add(file);
+
+      let pasteEvent;
+
+      try {
+        pasteEvent = new ClipboardEvent("paste", {
+          bubbles: true,
+          cancelable: true,
+          clipboardData: transfer,
+        });
+      } catch (_) {
+        pasteEvent = new Event("paste", {
+          bubbles: true,
+          cancelable: true,
+        });
+      }
+
+      if (!pasteEvent.clipboardData) {
+        Object.defineProperty(pasteEvent, "clipboardData", {
+          value: transfer,
+        });
+      }
+
+      editor.dispatchEvent(pasteEvent);
+      await sleep(1800);
+
+      if (
+        hasActiveGenerationProgress() ||
+        getNewGenerationTiles(previousTileIds).length
+      ) {
+        console.warn("[Flow Queue] Reference image paste triggered generation");
+        setStatus("", "Reference image triggered generation; tracking it");
+        return {
+          ok: true,
+          autoSubmitted: true,
+          previousTileIds,
+        };
+      }
+
+      return {
+        ok: true,
+        autoSubmitted: false,
+        previousTileIds: null,
+      };
     }
 
     await clearEditorWithRealKeys();
 
-    const inserted = await insertTextWithDebugger();
+    const inserted = await insertPromptText();
 
     if (!inserted) {
       setStatus("err", "Debugger text insertion failed");
@@ -1354,25 +2654,28 @@
 
     await sleep(800);
 
-    if (!hasPrompt()) {
-      console.warn(
-        "[Flow Queue] Editor text after debugger insert:",
-        getEditorText(),
-      );
-      setStatus("err", "Prompt was not inserted into the editor");
+    const referenceResult = await pasteReferenceImage();
+
+    if (!referenceResult.ok) {
+      setStatus("err", "Reference image could not be added");
       return false;
     }
 
-    const submitBtn = await waitForSubmitButton(7000);
-
-    if (!submitBtn) {
-      setStatus("err", "Prompt inserted, but submit button did not enable");
-      return false;
+    if (referenceResult.autoSubmitted) {
+      console.log("[Flow Queue] Prompt auto-submitted with reference image");
+      return referenceResult;
     }
+
+    await focusEditor();
+    await sleep(500);
 
     console.log("[Flow Queue] Prompt accepted:", getEditorText());
 
-    return true;
+    return {
+      ok: true,
+      autoSubmitted: false,
+      previousTileIds: null,
+    };
   }
 
   // ─── WAIT FOR COMPLETION ──────────────────────────────────────
@@ -1383,6 +2686,7 @@
     let latestNewTile = null;
     let lastProgressValue = null;
     let stableCompletedChecks = 0;
+    let settlingChecks = 0;
 
     while (Date.now() - started < MAX_WAIT_MS) {
       const newTiles = getNewGenerationTiles(previousTileIds);
@@ -1397,6 +2701,7 @@
       if (progressVisible) {
         sawGenerationStart = true;
         stableCompletedChecks = 0;
+        settlingChecks = 0;
         lastProgressValue = progressValue;
 
         setStatus(
@@ -1413,6 +2718,7 @@
       if (latestNewTile && tileHasProgress(latestNewTile)) {
         sawGenerationStart = true;
         stableCompletedChecks = 0;
+        settlingChecks = 0;
 
         const tileProgressText = Array.from(
           latestNewTile.querySelectorAll("div"),
@@ -1448,6 +2754,7 @@
         tileLooksCompleted(latestNewTile)
       ) {
         stableCompletedChecks += 1;
+        settlingChecks = 0;
 
         setStatus("", "Generation completed, confirming card is stable…");
 
@@ -1458,8 +2765,24 @@
           };
         }
       } else if (sawGenerationStart && latestNewTile) {
+        settlingChecks += 1;
         stableCompletedChecks = 0;
-        setStatus("", "Generation finishing… waiting for card to settle");
+
+        if (settlingChecks >= 6 && !tileHasProgress(latestNewTile)) {
+          console.warn("[Flow Queue] Treating settled card as complete", {
+            tileText: latestNewTile.textContent?.trim(),
+          });
+
+          return {
+            status: "done",
+            tile: latestNewTile,
+          };
+        }
+
+        setStatus(
+          "",
+          `Generation finishing… waiting for card to settle (${settlingChecks}/6)`,
+        );
       }
 
       await sleep(POLL_INTERVAL);
@@ -1515,9 +2838,68 @@
         `Running ${i + 1}/${queue.length}: "${item.text.slice(0, 40)}…"`,
       );
 
+      if (referenceImage && !referenceAssetSearchText) {
+        referenceAssetSearchText = await findReferenceImageInAssets();
+
+        if (referenceAssetSearchText) {
+          setStatus(
+            "",
+            `Reference image already in assets: ${referenceAssetSearchText}`,
+          );
+        }
+      }
+
+      if (referenceImage && !referenceAssetSearchText) {
+        const referencePreviousTileIds = await uploadReferenceImageForAsset();
+
+        if (!referencePreviousTileIds) {
+          failed = true;
+          failureMessage = "Could not upload reference image";
+          item.active = false;
+          renderQueue();
+          break;
+        }
+
+        setStatus("", "Reference image uploading. Waiting for asset...");
+
+        const referenceResult = await waitForCompletion(
+          referencePreviousTileIds,
+        );
+
+        if (referenceResult.status !== "done") {
+          failed = true;
+          failureMessage =
+            referenceResult.status === "failed"
+              ? "Reference image generation failed"
+              : "Reference image generation timed out";
+          setStatus(
+            referenceResult.status === "failed" ? "err" : "warn",
+            failureMessage,
+          );
+          item.active = false;
+          renderQueue();
+          break;
+        }
+
+        referenceAssetSearchText = getGeneratedAssetSearchText(
+          referenceResult.tile,
+        );
+
+        if (!referenceAssetSearchText) {
+          failed = true;
+          failureMessage = "Could not identify reference asset";
+          setStatus("err", failureMessage);
+          item.active = false;
+          renderQueue();
+          break;
+        }
+
+        setStatus("", `Reference asset ready: ${referenceAssetSearchText}`);
+      }
+
       const injected = await injectPrompt(item.text);
 
-      if (!injected) {
+      if (!injected?.ok) {
         failed = true;
         failureMessage = "Prompt was not accepted by the editor";
         setStatus("err", failureMessage);
@@ -1526,27 +2908,32 @@
         break;
       }
 
-      await sleep(2500);
+      let previousTileIds = injected.previousTileIds;
 
-      const previousTileIds = getGeneratedTileIds();
+      if (!injected.autoSubmitted) {
+        await sleep(2500);
+        previousTileIds = getGeneratedTileIds();
 
-      const submitted = await clickSubmit();
+        const submitted = await clickSubmit();
 
-      if (!submitted) {
-        failed = true;
-        failureMessage = "Could not find or click the submit button";
-        setStatus("err", failureMessage);
-        item.active = false;
-        renderQueue();
-        break;
+        if (!submitted) {
+          failed = true;
+          failureMessage = "Could not find or click the submit button";
+          setStatus("err", failureMessage);
+          item.active = false;
+          renderQueue();
+          break;
+        }
       }
 
       setStatus(
         "",
-        `Submitted. Waiting for generation to finish… (${i + 1}/${queue.length})`,
+        injected.autoSubmitted
+          ? `Reference image started generation. Waiting… (${i + 1}/${queue.length})`
+          : `Submitted. Waiting for generation to finish… (${i + 1}/${queue.length})`,
       );
 
-      const result = await waitForCompletion(previousTileIds);
+      let result = await waitForCompletion(previousTileIds);
 
       if (result.status !== "done") {
         failed = true;
@@ -1561,6 +2948,72 @@
         item.active = false;
         renderQueue();
         break;
+      }
+
+      if (injected.autoSubmitted) {
+        setStatus(
+          "",
+          "Reference generation done. Adding generated image to prompt...",
+        );
+
+        const assetAdded = await addGeneratedAssetToPrompt(result.tile);
+
+        if (!assetAdded) {
+          failed = true;
+          failureMessage = "Could not add generated image to prompt";
+          item.active = false;
+          renderQueue();
+          break;
+        }
+
+        const promptAdded = await addPromptTextToCurrentPrompt(item.text);
+
+        if (!promptAdded) {
+          failed = true;
+          failureMessage = "Could not add prompt text after generated image";
+          item.active = false;
+          renderQueue();
+          break;
+        }
+
+        await sleep(1500);
+        previousTileIds = getGeneratedTileIds();
+
+        const submitted = await clickSubmit();
+
+        if (!submitted) {
+          failed = true;
+          failureMessage = "Could not submit prompt with generated image";
+          setStatus("err", failureMessage);
+          item.active = false;
+          renderQueue();
+          break;
+        }
+
+        setStatus(
+          "",
+          `Submitted with generated image. Waiting... (${i + 1}/${queue.length})`,
+        );
+
+        result = await waitForCompletion(previousTileIds);
+
+        if (result.status !== "done") {
+          failed = true;
+
+          failureMessage =
+            result.status === "failed"
+              ? `Prompt ${i + 1} failed during final generation`
+              : `Prompt ${i + 1} timed out during final generation`;
+
+          setStatus(
+            result.status === "failed" ? "err" : "warn",
+            failureMessage,
+          );
+
+          item.active = false;
+          renderQueue();
+          break;
+        }
       }
 
       const baseFilename = makeFilenameFromPrompt(i, item.text);

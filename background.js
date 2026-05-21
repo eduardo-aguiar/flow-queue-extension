@@ -100,6 +100,61 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     return true;
   }
 
+  if (message?.type === "FPQ_CLEAR_TEXT") {
+    (async () => {
+      try {
+        await attachDebugger();
+
+        await chrome.debugger.sendCommand({ tabId }, "Input.dispatchKeyEvent", {
+          type: "rawKeyDown",
+          key: "a",
+          code: "KeyA",
+          windowsVirtualKeyCode: 65,
+          nativeVirtualKeyCode: 65,
+          modifiers: 2,
+        });
+
+        await chrome.debugger.sendCommand({ tabId }, "Input.dispatchKeyEvent", {
+          type: "keyUp",
+          key: "a",
+          code: "KeyA",
+          windowsVirtualKeyCode: 65,
+          nativeVirtualKeyCode: 65,
+          modifiers: 2,
+        });
+
+        await chrome.debugger.sendCommand({ tabId }, "Input.dispatchKeyEvent", {
+          type: "rawKeyDown",
+          key: "Backspace",
+          code: "Backspace",
+          windowsVirtualKeyCode: 8,
+          nativeVirtualKeyCode: 8,
+        });
+
+        await chrome.debugger.sendCommand({ tabId }, "Input.dispatchKeyEvent", {
+          type: "keyUp",
+          key: "Backspace",
+          code: "Backspace",
+          windowsVirtualKeyCode: 8,
+          nativeVirtualKeyCode: 8,
+        });
+
+        await detachDebugger();
+
+        sendResponse({ ok: true });
+      } catch (err) {
+        await detachDebugger();
+
+        sendResponse({
+          ok: false,
+          error: err?.message || String(err),
+        });
+      }
+    })();
+
+    return true;
+  }
+
   if (message?.type === "FPQ_MOUSE_MOVE_TO") {
     (async () => {
       try {
