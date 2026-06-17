@@ -2,7 +2,7 @@
   "manifest_version": 3,
   "name": "Flow Prompt Queue",
   "version": "1.0.0",
-  "description": "Queue and auto-run multiple prompts on Google Flow",
+  "description": "Queue and auto-run prompts on Google Flow and Meta AI",
   "permissions": [
     "debugger",
     "tabs",
@@ -13,15 +13,39 @@
     "activeTab",
     "downloads"
   ],
-  "host_permissions": ["https://labs.google/*"],
+  "host_permissions": [
+    "https://labs.google/*",
+    "https://www.meta.ai/*",
+    "https://meta.ai/*",
+    "file://*/*"
+  ],
   "background": {
     "service_worker": "background.js"
   },
   "content_scripts": [
     {
-      "matches": ["https://labs.google/fx/tools/flow*"],
-      "js": ["content.js"],
-      "css": ["panel.css"],
+      "matches": [
+        "https://labs.google/fx/tools/flow*"
+      ],
+      "js": [
+        "content.js"
+      ],
+      "css": [
+        "panel.css"
+      ],
+      "run_at": "document_idle"
+    },
+    {
+      "matches": [
+        "https://www.meta.ai/*",
+        "https://meta.ai/*"
+      ],
+      "js": [
+        "meta-ai.js"
+      ],
+      "css": [
+        "panel.css"
+      ],
       "run_at": "document_idle"
     }
   ],

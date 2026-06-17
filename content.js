@@ -52,7 +52,10 @@
 
     <div id="fpq-body">
       <div id="fpq-input-area">
-        <textarea id="fpq-textarea" placeholder="Type a prompt… one prompt per line" rows="3"></textarea>
+        <div class="fpq-prompt-label">Flow prompts</div>
+        <textarea id="fpq-textarea" placeholder="Paste prompt blocks separated by blank lines" rows="3"></textarea>
+        <div class="fpq-prompt-label">Meta prompts</div>
+        <textarea id="fpq-meta-textarea" placeholder="Paste matching prompt blocks separated by blank lines" rows="3"></textarea>
         <div id="fpq-reference-drop" tabindex="0" role="button">
           <span id="fpq-reference-text">choose reference image</span>
           <span id="fpq-reference-name">none</span>
@@ -73,7 +76,7 @@
       <div id="fpq-progress-bar-wrap"><div id="fpq-progress-bar"></div></div>
 
       <div id="fpq-queue-area">
-        <div id="fpq-queue-empty">Queue is empty — add prompts above</div>
+        <div id="fpq-queue-empty">Queue is empty — add prompt blocks above</div>
       </div>
 
       <div id="fpq-controls">
@@ -96,6 +99,7 @@
   const $ = (id) => root.querySelector("#" + id);
 
   const textarea = $("fpq-textarea");
+  const metaTextarea = $("fpq-meta-textarea");
   const referenceDrop = $("fpq-reference-drop");
   const referenceText = $("fpq-reference-text");
   const referenceName = $("fpq-reference-name");
@@ -274,28 +278,131 @@
   }
 
   function getGeneratedTileIds() {
-    const root = getGenerationRoot();
-
     return new Set(
-      Array.from(root.querySelectorAll("[data-tile-id]"))
-        .map((el) => el.getAttribute("data-tile-id"))
+      getGenerationTiles()
+        .map(getGenerationTileKey)
         .filter(Boolean),
     );
   }
 
+  function getGenerationTileKey(tile) {
+    if (!tile) return "";
+
+    const tileId =
+      tile.getAttribute("data-tile-id") ||
+      tile.closest("[data-tile-id]")?.getAttribute("data-tile-id");
+
+    if (tileId) return `tile:${tileId}`;
+
+    const editHref =
+      tile.matches?.('a[href*="/edit/"]') && tile.href
+        ? tile.href
+        : tile.querySelector?.('a[href*="/edit/"]')?.href ||
+          tile.closest?.('a[href*="/edit/"]')?.href;
+
+    if (editHref) return `edit:${editHref}`;
+
+    const media = tile.matches?.("img, canvas, video")
+      ? tile
+      : tile.querySelector?.("img, canvas, video");
+
+    if (media) {
+      const src =
+        media.currentSrc ||
+        media.src ||
+        media.getAttribute("src") ||
+        media.getAttribute("poster") ||
+        media.getAttribute("alt") ||
+        "";
+
+      const rect = media.getBoundingClientRect();
+      const rectKey = [
+        Math.round(rect.left),
+        Math.round(rect.top),
+        Math.round(rect.width),
+        Math.round(rect.height),
+      ].join(":");
+
+      return `media:${src.slice(0, 160)}:${rectKey}`;
+    }
+
+    return "";
+  }
+
+  function findGenerationCandidateContainer(el) {
+    if (!el || !isVisible(el)) return null;
+
+    const byTileId = el.closest("[data-tile-id]");
+    if (byTileId && isVisible(byTileId)) return byTileId;
+
+    const byEditLink = el.closest('a[href*="/edit/"]');
+    if (byEditLink && isVisible(byEditLink)) return byEditLink;
+
+    let current = el;
+    let best = el;
+
+    for (let i = 0; i < 8 && current?.parentElement; i++) {
+      current = current.parentElement;
+
+      if (!isVisible(current) || current.closest("#fpq-root")) continue;
+
+      const rect = current.getBoundingClientRect();
+      const bestRect = best.getBoundingClientRect();
+      const area = rect.width * rect.height;
+      const bestArea = bestRect.width * bestRect.height;
+      const hasGenerationSurface = current.querySelector(
+        'img, canvas, video, a[href*="/edit/"]',
+      );
+
+      if (
+        hasGenerationSurface &&
+        area >= bestArea &&
+        rect.width >= 120 &&
+        rect.height >= 120
+      ) {
+        best = current;
+      }
+    }
+
+    return best;
+  }
+
   function getGenerationTiles() {
     const root = getGenerationRoot();
+    const candidates = [];
 
-    return Array.from(root.querySelectorAll("[data-tile-id]")).filter(
-      isVisible,
-    );
+    const addCandidate = (el) => {
+      const candidate = findGenerationCandidateContainer(el);
+
+      if (!candidate || candidate.closest("#fpq-root")) return;
+      if (!isVisible(candidate)) return;
+
+      candidates.push(candidate);
+    };
+
+    Array.from(
+      root.querySelectorAll('[data-tile-id], a[href*="/edit/"], img, canvas, video'),
+    )
+      .filter(isVisible)
+      .forEach(addCandidate);
+
+    const seen = new Set();
+
+    return candidates.filter((candidate) => {
+      const key = getGenerationTileKey(candidate);
+
+      if (!key || seen.has(key)) return false;
+
+      seen.add(key);
+      return true;
+    });
   }
 
   function getNewGenerationTiles(previousTileIds) {
     const safePreviousIds = normalizeIdSet(previousTileIds);
 
     return getGenerationTiles().filter((tile) => {
-      const id = tile.getAttribute("data-tile-id");
+      const id = getGenerationTileKey(tile);
       return id && !safePreviousIds.has(id);
     });
   }
@@ -311,6 +418,7 @@
       const value = parseInt(text.replace("%", ""), 10);
 
       if (!Number.isFinite(value)) return false;
+      if (value >= 100) return false;
 
       return isVisible(el);
     });
@@ -333,7 +441,14 @@
 
     return Array.from(tile.querySelectorAll("div")).some((el) => {
       const text = el.textContent?.trim() || "";
-      return /^\d{1,3}%$/.test(text) && isVisible(el);
+
+      if (!/^\d{1,3}%$/.test(text) || !isVisible(el)) {
+        return false;
+      }
+
+      const value = parseInt(text.replace("%", ""), 10);
+
+      return Number.isFinite(value) && value < 100;
     });
   }
 
@@ -644,16 +759,22 @@
   }
 
   function makeFilenameFromPrompt(index, prompt) {
-    const slug =
-      String(prompt || "flow-image")
-        .slice(0, 70)
-        .toLowerCase()
-        .normalize("NFD")
-        .replace(/[\u0300-\u036f]/g, "")
-        .replace(/[^\p{L}\p{N}]+/gu, "-")
-        .replace(/^-+|-+$/g, "") || "flow-image";
+    const raw = String(prompt || "flow-image")
+      .toLowerCase()
+      .normalize("NFD")
+      .replace(/[\u0300-\u036f]/g, "")
+      .replace(/[^\p{L}\p{N}\s]+/gu, " ")
+      .replace(/\s+/g, " ")
+      .trim();
 
-    return `flow-${String(index + 1).padStart(3, "0")}-${slug}`;
+    const excerpt =
+      raw
+        .split(" ")
+        .filter(Boolean)
+        .slice(0, 6)
+        .join("-") || "flow-image";
+
+    return `${index + 1},${excerpt}`;
   }
 
   async function setNextDownloadFilename(filename) {
@@ -683,7 +804,47 @@
             return;
           }
 
-          resolve(true);
+          resolve({
+            ok: true,
+            filename: response.filename,
+            requestId: response.requestId,
+          });
+        },
+      );
+    });
+  }
+
+  async function waitForDownloadConfirmation(requestId) {
+    if (!requestId) {
+      return false;
+    }
+
+    return new Promise((resolve) => {
+      chrome.runtime.sendMessage(
+        {
+          type: "FPQ_WAIT_FOR_DOWNLOAD",
+          requestId,
+        },
+        (response) => {
+          if (chrome.runtime.lastError) {
+            console.warn(
+              "[Flow Queue] Download confirmation failed:",
+              chrome.runtime.lastError.message,
+            );
+            resolve(false);
+            return;
+          }
+
+          if (!response?.ok) {
+            console.warn(
+              "[Flow Queue] Download confirmation returned non-ok response:",
+              response,
+            );
+            resolve(false);
+            return;
+          }
+
+          resolve(response.state === "complete");
         },
       );
     });
@@ -1095,23 +1256,98 @@
     return Boolean(await waitForDownloadSubmenuOpen(5000));
   }
 
+  async function syntheticClick(el, label = "element") {
+    if (!el || !isVisible(el)) {
+      console.warn(`[Flow Queue] Cannot synthetic-click ${label}: not visible`);
+      return false;
+    }
+
+    el.scrollIntoView({ block: "center", inline: "center" });
+    await sleep(300);
+
+    const rect = el.getBoundingClientRect();
+    const x = rect.left + rect.width / 2;
+    const y = rect.top + rect.height / 2;
+
+    const sequence = [
+      "pointerover",
+      "pointerenter",
+      "pointerdown",
+      "mousedown",
+      "pointerup",
+      "mouseup",
+      "click",
+    ];
+
+    for (const eventName of sequence) {
+      const EventCtor = eventName.startsWith("pointer")
+        ? PointerEvent
+        : MouseEvent;
+
+      el.dispatchEvent(
+        new EventCtor(eventName, {
+          bubbles: true,
+          cancelable: true,
+          view: window,
+          clientX: x,
+          clientY: y,
+          button: 0,
+          pointerType: "mouse",
+        }),
+      );
+    }
+
+    return true;
+  }
+
+  function findDownloadToolbarButtonNow() {
+    return (
+      Array.from(
+        document.querySelectorAll('button[aria-haspopup="menu"]'),
+      ).find((btn) => {
+        if (!isVisible(btn)) return false;
+
+        const hasDownloadIcon = Array.from(btn.querySelectorAll("i")).some(
+          (icon) => icon.textContent?.trim() === "download",
+        );
+
+        return hasDownloadIcon;
+      }) || null
+    );
+  }
+
+  async function waitForDownloadToolbarButton(timeout = 8000) {
+    const started = Date.now();
+
+    while (Date.now() - started < timeout) {
+      const btn = findDownloadToolbarButtonNow();
+
+      if (btn) return btn;
+
+      await sleep(400);
+    }
+
+    return null;
+  }
+
   async function clickDownloadSubmenuOption() {
     const started = Date.now();
     const timeout = 10000;
 
+    const matches2K = (text) =>
+      text.includes("2k") || text.includes("2 k") || text.includes("upscaled");
+
+    let openedDownloadSubmenu = false;
+
     while (Date.now() - started < timeout) {
       const menuItems = await getVisibleMenuItems();
 
+      // Direct 2K item visible?
       const twoKItem = menuItems.find((item) => {
         const text = getVisibleText(item).toLowerCase();
         const ariaDisabled = item.getAttribute("aria-disabled") === "true";
 
-        return (
-          !ariaDisabled &&
-          (text.includes("2k") ||
-            text.includes("2 k") ||
-            text.includes("upscaled"))
-        );
+        return !ariaDisabled && matches2K(text);
       });
 
       if (twoKItem) {
@@ -1119,6 +1355,25 @@
         await sleep(300);
 
         return realClickElement(twoKItem, "2K download option");
+      }
+
+      // Otherwise, a "Download" submenu trigger may need hovering first.
+      if (!openedDownloadSubmenu) {
+        const downloadSubmenu = menuItems.find((item) => {
+          const text = getVisibleText(item).toLowerCase();
+          const hasSubmenu =
+            item.getAttribute("aria-haspopup") === "menu" ||
+            item.getAttribute("aria-expanded") !== null;
+
+          return text.includes("download") && hasSubmenu;
+        });
+
+        if (downloadSubmenu) {
+          await moveMouseToElement(downloadSubmenu, "Download submenu trigger");
+          await sleep(900);
+          openedDownloadSubmenu = true;
+          continue;
+        }
       }
 
       await sleep(300);
@@ -1134,147 +1389,323 @@
       return false;
     }
 
-    const card = findBestCardContainer(tile);
+    // Open the image detail view, where the Download button lives.
+    // Each gallery tile image sits inside an <a href=".../edit/<id>"> link,
+    // so we navigate via that link. The completed tile passed in may itself
+    // not contain the link, so we resolve it robustly.
+    const tileImg = tile.querySelector("img");
 
-    if (!card || !isVisible(card)) {
-      console.warn("[Flow Queue] Cannot download: card container not found", {
-        tileText: tile.textContent?.trim(),
+    let detailLink = tile.querySelector('a[href*="/edit/"]');
+
+    // Fallback 1: the tile may be nested inside the link.
+    if (!detailLink) {
+      detailLink = tile.closest('a[href*="/edit/"]');
+    }
+
+    // Fallback 2: resolve via the tile's data-tile-id across the gallery.
+    if (!detailLink) {
+      const tid =
+        tile.getAttribute("data-tile-id") ||
+        tile.closest("[data-tile-id]")?.getAttribute("data-tile-id");
+
+      if (tid) {
+        const galleryTile = Array.from(
+          document.querySelectorAll(`[data-tile-id="${tid}"]`),
+        ).find((t) => t.querySelector('a[href*="/edit/"]'));
+
+        detailLink = galleryTile?.querySelector('a[href*="/edit/"]') || null;
+      }
+    }
+
+    // Fallback 3: any visible detail link tied to the tile's image src.
+    if (!detailLink && tileImg) {
+      const links = Array.from(
+        document.querySelectorAll('a[href*="/edit/"]'),
+      ).filter(isVisible);
+
+      detailLink =
+        links.find((a) => a.querySelector("img") === tileImg) ||
+        links.find((a) => a.contains(tileImg)) ||
+        null;
+    }
+
+    console.log("[Flow Queue] Download nav target:", {
+      foundDetailLink: !!detailLink,
+      href: detailLink?.getAttribute("href") || null,
+      tileId: tile.getAttribute("data-tile-id") || null,
+    });
+
+    setStatus("", "Opening image detail view…");
+
+    // The detail <a> link may not be navigable immediately after generation.
+    // Poll: (re)resolve the link, synthetic-click it, and confirm the URL
+    // actually moved to /edit/ — retry until it does or we time out.
+    const navStarted = Date.now();
+    const navTimeout = 20000;
+
+    const resolveDetailLink = () => {
+      let link = tile.querySelector('a[href*="/edit/"]');
+
+      if (!link) link = tile.closest('a[href*="/edit/"]');
+
+      if (!link) {
+        const tid =
+          tile.getAttribute("data-tile-id") ||
+          tile.closest("[data-tile-id]")?.getAttribute("data-tile-id");
+
+        if (tid) {
+          const gt = Array.from(
+            document.querySelectorAll(`[data-tile-id="${tid}"]`),
+          ).find((t) => t.querySelector('a[href*="/edit/"]'));
+
+          link = gt?.querySelector('a[href*="/edit/"]') || null;
+        }
+      }
+
+      if (!link && tileImg) {
+        const links = Array.from(
+          document.querySelectorAll('a[href*="/edit/"]'),
+        ).filter(isVisible);
+
+        link =
+          links.find((a) => a.contains(tileImg)) || null;
+      }
+
+      return link;
+    };
+
+    while (!location.href.includes("/edit/") && Date.now() - navStarted < navTimeout) {
+      const link = resolveDetailLink() || detailLink;
+
+      if (link && isVisible(link)) {
+        await syntheticClick(link, "image detail link");
+      } else if (tileImg && isVisible(tileImg)) {
+        await syntheticClick(tileImg, "generated image");
+      }
+
+      await sleep(1500);
+    }
+
+    console.log("[Flow Queue] After nav, url:", location.href);
+
+    const tryTriggerDownload = async (attemptNumber) => {
+      setStatus("", `Locating Download button (attempt ${attemptNumber})…`);
+
+      const downloadButton = await waitForDownloadToolbarButton(8000);
+
+      if (!downloadButton) {
+        console.warn("[Flow Queue] Download toolbar button not found", {
+          haspopupButtons: Array.from(
+            document.querySelectorAll('button[aria-haspopup="menu"]'),
+          ).map((b) => ({
+            icons: Array.from(b.querySelectorAll("i")).map((i) =>
+              i.textContent?.trim(),
+            ),
+            visible: isVisible(b),
+          })),
+        });
+        return false;
+      }
+
+      setStatus("", `Opening Download menu (attempt ${attemptNumber})…`);
+
+      await realClickElement(downloadButton, "Download button");
+
+      let menu = await waitForMenuOpen(3000);
+
+      if (!menu) {
+        await syntheticClick(downloadButton, "Download button (synthetic)");
+        menu = await waitForMenuOpen(4000);
+      }
+
+      if (!menu) {
+        console.warn("[Flow Queue] Download menu did not open");
+        return false;
+      }
+
+      await sleep(1000);
+
+      setStatus("", `Selecting 2K download option (attempt ${attemptNumber})…`);
+
+      const nextDownload = await setNextDownloadFilename(filename);
+
+      if (!nextDownload?.ok) {
+        console.warn("[Flow Queue] Could not prepare next download filename");
+        return false;
+      }
+
+      const clicked2K = await clickDownloadSubmenuOption();
+
+      if (!clicked2K) {
+        console.warn("[Flow Queue] Could not select 2K download option");
+        return false;
+      }
+
+      setStatus("", "Waiting for download confirmation…");
+
+      const confirmed = await waitForDownloadConfirmation(
+        nextDownload.requestId,
+      );
+
+      if (!confirmed) {
+        console.warn("[Flow Queue] Download was not confirmed by Chrome");
+        return false;
+      }
+
+      return true;
+    };
+
+    for (let attempt = 1; attempt <= 2; attempt++) {
+      const ok = await tryTriggerDownload(attempt);
+
+      if (ok) {
+        setStatus("ok", "2K download confirmed");
+        return true;
+      }
+
+      if (attempt < 2) {
+        setStatus("warn", "Download did not confirm. Retrying…");
+        await sleep(1800);
+      }
+    }
+
+    setStatus("warn", "Download could not be confirmed after retry");
+    return false;
+  }
+
+  function registerFlowController() {
+    chrome.runtime.sendMessage({ type: "MAQ_REGISTER_FLOW_CONTROLLER" }, () => {
+      void chrome.runtime.lastError;
+    });
+  }
+
+  function activateFlowTab() {
+    return new Promise((resolve) => {
+      chrome.runtime.sendMessage({ type: "MAQ_ACTIVATE_FLOW_TAB" }, (response) => {
+        if (chrome.runtime.lastError) {
+          resolve(false);
+          return;
+        }
+
+        resolve(Boolean(response?.ok));
       });
+    });
+  }
 
-      setStatus("warn", "Could not find completed card container");
-      return false;
+  function pickSrcFromSrcset(srcset) {
+    return String(srcset || "")
+      .split(",")
+      .map((part) => part.trim().split(/\s+/)[0])
+      .filter(Boolean)
+      .pop();
+  }
+
+  function getBackgroundImageUrl(el) {
+    const match = window
+      .getComputedStyle(el)
+      .backgroundImage.match(/url\(["']?([^"')]+)["']?\)/);
+
+    return match?.[1] || "";
+  }
+
+  async function imageSourceToPayload(src) {
+    if (!src) return null;
+
+    if (src.startsWith("data:")) {
+      const mimeType = src.match(/^data:([^;,]+)/)?.[1] || "image/png";
+      return { dataUrl: src, mimeType };
     }
 
-    setStatus("", "Hovering completed card…");
-
-    await hoverElement(card, "completed card container");
-    await moveMouseToElement(card, "completed card container");
-
-    const rect = card.getBoundingClientRect();
-
-    const hoverPoints = [
-      {
-        x: Math.round(rect.left + rect.width / 2),
-        y: Math.round(rect.top + rect.height / 2),
-      },
-      {
-        x: Math.round(rect.right - 20),
-        y: Math.round(rect.top + 20),
-      },
-      {
-        x: Math.round(rect.right - 20),
-        y: Math.round(rect.top + rect.height / 2),
-      },
-      {
-        x: Math.round(rect.right - 20),
-        y: Math.round(rect.bottom - 20),
-      },
-    ];
-
-    for (const point of hoverPoints) {
-      await moveMouseToPoint(point.x, point.y, "card hover point");
-      await sleep(500);
+    const resp = await fetch(src);
+    if (!resp.ok) {
+      throw new Error(`Could not fetch generated image (${resp.status})`);
     }
 
-    await sleep(1500);
+    const blob = await resp.blob();
+    if (!blob.size) {
+      throw new Error("Generated image payload was empty");
+    }
 
-    setStatus("", "Opening card menu to download…");
+    return {
+      dataUrl: await fileToDataUrl(blob),
+      mimeType: blob.type || "image/png",
+    };
+  }
 
-    console.log("[Flow Queue] Card selected for download:", card);
-    console.log(
-      "[Flow Queue] Candidate buttons inside card:",
-      Array.from(card.querySelectorAll("button, [role='button']")).map(
-        (btn) => ({
-          text: btn.textContent?.trim(),
-          ariaLabel: btn.getAttribute("aria-label"),
-          title: btn.getAttribute("title"),
-          icon: Array.from(btn.querySelectorAll("i"))
-            .map((i) => i.textContent?.trim())
-            .filter(Boolean),
-          visible: isVisible(btn),
-          rect: btn.getBoundingClientRect(),
-        }),
-      ),
+  async function mediaElementToPayload(el) {
+    if (!el || !isVisible(el) || el.closest("#fpq-root")) {
+      return null;
+    }
+
+    if (el.tagName === "CANVAS") {
+      const dataUrl = el.toDataURL("image/png");
+      return dataUrl ? { dataUrl, mimeType: "image/png" } : null;
+    }
+
+    const src =
+      el.currentSrc ||
+      el.src ||
+      pickSrcFromSrcset(el.getAttribute?.("srcset")) ||
+      el.getAttribute?.("src") ||
+      getBackgroundImageUrl(el);
+
+    return imageSourceToPayload(src);
+  }
+
+  async function extractTileImagePayload(tile) {
+    const roots = [tile, location.href.includes("/edit/") ? document : null].filter(
+      Boolean,
     );
 
-    let moreButton = findTileMoreButton(card);
+    const candidates = [];
+    for (const rootNode of roots) {
+      const nodes = Array.from(
+        rootNode.querySelectorAll?.("img, source, canvas, [role='img']") || [],
+      );
 
-    if (!moreButton) {
-      console.warn("[Flow Queue] More/options button not found after hover", {
-        cardText: card.textContent?.trim(),
-        cardHtml: card.outerHTML?.slice(0, 2000),
-        globalButtons: Array.from(
-          document.querySelectorAll("button, [role='button']"),
-        ).map((btn) => ({
-          text: btn.textContent?.trim(),
-          ariaLabel: btn.getAttribute("aria-label"),
-          title: btn.getAttribute("title"),
-          visible: isVisible(btn),
-          icon: btn.querySelector("i")?.textContent?.trim(),
-          rect: (() => {
-            const r = btn.getBoundingClientRect();
+      if (rootNode.matches?.("img, source, canvas, [role='img']")) {
+        nodes.unshift(rootNode);
+      }
 
-            return {
-              x: Math.round(r.x),
-              y: Math.round(r.y),
-              width: Math.round(r.width),
-              height: Math.round(r.height),
-            };
-          })(),
-        })),
-      });
-
-      setStatus("warn", "Could not find card menu button after hover");
-      return false;
+      candidates.push(...nodes.filter(isVisible));
     }
 
-    await hoverElement(moreButton, "more/options button");
-    await moveMouseToElement(moreButton, "more/options button");
+    candidates.sort((a, b) => {
+      const ar = a.getBoundingClientRect();
+      const br = b.getBoundingClientRect();
+      return br.width * br.height - ar.width * ar.height;
+    });
 
-    const opened = await realClickElement(
-      moreButton,
-      "tile more/options button",
-    );
-
-    if (!opened) {
-      setStatus("warn", "Could not open card menu");
-      return false;
+    for (const candidate of candidates) {
+      try {
+        const payload = await mediaElementToPayload(candidate);
+        if (payload) return payload;
+      } catch (err) {
+        console.warn("[Flow Queue] Image payload candidate failed:", err);
+      }
     }
 
-    const menu = await waitForMenuOpen();
+    return null;
+  }
 
-    if (!menu) {
-      setStatus("warn", "Card menu did not open");
-      return false;
-    }
+  function enqueueMetaJob(job) {
+    return new Promise((resolve) => {
+      chrome.runtime.sendMessage(
+        { type: "MAQ_ENQUEUE_META_JOB", job },
+        (response) => {
+          if (chrome.runtime.lastError) {
+            console.warn(
+              "[Flow Queue] Could not enqueue Meta job:",
+              chrome.runtime.lastError.message,
+            );
+            resolve(false);
+            return;
+          }
 
-    setStatus("", "Opening Download submenu…");
-
-    const clickedDownload = await clickDownloadMenuItem();
-
-    if (!clickedDownload) {
-      setStatus("warn", "Could not hover/open Download submenu");
-      return false;
-    }
-
-    await sleep(1500);
-
-    setStatus("", "Selecting 2K download option…");
-
-    await setNextDownloadFilename(filename);
-
-    const clicked2K = await clickDownloadSubmenuOption();
-
-    if (!clicked2K) {
-      setStatus("warn", "Could not select 2K download option");
-      return false;
-    }
-
-    setStatus("ok", "2K download triggered");
-
-    await sleep(2000);
-
-    return true;
+          resolve(Boolean(response?.ok));
+        },
+      );
+    });
   }
 
   function getGeneratedAssetSearchText(tile) {
@@ -1877,31 +2308,52 @@
   });
 
   // ─── ADD PROMPTS ──────────────────────────────────────────────
-  function addPrompts() {
-    const raw = textarea.value.trim();
-
-    if (!raw) return;
-
-    const lines = raw
-      .split("\n")
-      .map((line) => line.trim())
+  function splitPromptBlocks(raw) {
+    return String(raw || "")
+      .trim()
+      .split(/\n\s*\n+/)
+      .map((block) => block.trim())
       .filter(Boolean);
+  }
 
-    lines.forEach((text) => {
+  function addPrompts() {
+    const flowRaw = textarea.value.trim();
+    const metaRaw = metaTextarea.value.trim();
+
+    if (!flowRaw || !metaRaw) return;
+
+    const flowBlocks = splitPromptBlocks(flowRaw);
+    const metaBlocks = splitPromptBlocks(metaRaw);
+    const n = Math.min(flowBlocks.length, metaBlocks.length);
+
+    if (!n) return;
+
+    if (flowBlocks.length !== metaBlocks.length) {
+      setStatus(
+        "warn",
+        `${flowBlocks.length} flow blocks vs ${metaBlocks.length} meta blocks - running ${n} paired jobs`,
+      );
+    }
+
+    for (let i = 0; i < n; i++) {
       queue.push({
-        text,
+        text: flowBlocks[i],
+        flowText: flowBlocks[i],
+        metaText: metaBlocks[i],
         done: false,
         active: false,
+        metaStatus: "idle",
         id: ++idCounter,
       });
-    });
+    }
 
     textarea.value = "";
+    metaTextarea.value = "";
     delayBetween = parseInt(delayInput.value, 10) || 5;
     downloadFolder = getDownloadFolder();
 
     renderQueue();
-    setStatus("", `${lines.length} prompt(s) added`);
+    setStatus("", `${n} paired job(s) added`);
   }
 
   addBtn.addEventListener("click", addPrompts);
@@ -1912,6 +2364,15 @@
       addPrompts();
     }
   });
+
+  if (metaTextarea) {
+    metaTextarea.addEventListener("keydown", (e) => {
+      if (e.key === "Enter" && e.ctrlKey) {
+        e.preventDefault();
+        addPrompts();
+      }
+    });
+  }
 
   // ─── RENDER QUEUE ─────────────────────────────────────────────
   function renderQueue() {
@@ -1937,11 +2398,33 @@
 
       el.dataset.id = item.id;
 
-      const statusIcon = item.done ? "✓" : item.active ? "⟳" : "·";
+      const metaStatus = item.metaStatus || "idle";
+      const metaStatusLabel =
+        metaStatus === "done"
+          ? "video done"
+          : metaStatus === "running"
+            ? "video running in background"
+            : metaStatus === "queued"
+              ? "video queued"
+              : metaStatus === "failed"
+                ? "video failed"
+                : "video waiting";
+      const statusIcon =
+        metaStatus === "done"
+          ? "✓"
+          : metaStatus === "running"
+            ? "▶"
+            : metaStatus === "queued"
+              ? "…"
+              : item.done
+                ? "✓"
+                : item.active
+                  ? "⟳"
+                  : "·";
 
       el.innerHTML = `
         <span class="fpq-item-index">${i + 1}</span>
-        <span class="fpq-item-text">${escHtml(item.text)}</span>
+        <span class="fpq-item-text">${escHtml(item.flowText || item.text)}<br><span style="opacity:.55;font-size:10px">meta: ${escHtml(item.metaText || "")}</span><br><span style="opacity:.72;font-size:10px">${escHtml(metaStatusLabel)}</span></span>
         <span class="fpq-item-status">${statusIcon}</span>
         <button class="fpq-item-del" data-id="${item.id}" title="Remove">×</button>
       `;
@@ -1969,6 +2452,24 @@
   }
 
   // ─── FIND SUBMIT BUTTON ───────────────────────────────────────
+  chrome.runtime.onMessage.addListener((message) => {
+    if (message?.type !== "MAQ_META_JOB_STATUS") {
+      return;
+    }
+
+    const item = queue.find((q) => q.id === message.jobId);
+
+    if (!item) {
+      return;
+    }
+
+    item.metaStatus = message.status || item.metaStatus || "idle";
+    if (message.error) {
+      item.metaError = message.error;
+    }
+    renderQueue();
+  });
+
   function buttonIsEnabled(btn) {
     return (
       btn &&
@@ -2770,7 +3271,7 @@
 
         if (settlingChecks >= 6 && !tileHasProgress(latestNewTile)) {
           console.warn("[Flow Queue] Treating settled card as complete", {
-            tileText: latestNewTile.textContent?.trim(),
+            tileText: latestNewTile.textContent?.trim() || "",
           });
 
           return {
@@ -2823,232 +3324,255 @@
     let failed = false;
     let failureMessage = "";
 
-    for (let i = 0; i < queue.length; i++) {
-      if (stopFlag) break;
+    try {
+      for (let i = 0; i < queue.length; i++) {
+        if (stopFlag) break;
 
-      const item = queue[i];
+        const item = queue[i];
+        const flowPrompt = item.flowText || item.text || "";
+        const metaPrompt = item.metaText || "";
 
-      if (item.done) continue;
+        if (item.done) continue;
 
-      item.active = true;
-      renderQueue();
+        item.active = true;
+        renderQueue();
 
-      setStatus(
-        "ok",
-        `Running ${i + 1}/${queue.length}: "${item.text.slice(0, 40)}…"`,
-      );
+        try {
+          await activateFlowTab();
+          await sleep(500);
 
-      if (referenceImage && !referenceAssetSearchText) {
-        referenceAssetSearchText = await findReferenceImageInAssets();
+          setStatus(
+            "ok",
+            `Running ${i + 1}/${queue.length}: "${flowPrompt.slice(0, 40)}…"`,
+          );
 
-        if (referenceAssetSearchText) {
+          if (referenceImage && !referenceAssetSearchText) {
+            referenceAssetSearchText = await findReferenceImageInAssets();
+
+            if (referenceAssetSearchText) {
+              setStatus(
+                "",
+                `Reference image already in assets: ${referenceAssetSearchText}`,
+              );
+            }
+          }
+
+          if (referenceImage && !referenceAssetSearchText) {
+            const referencePreviousTileIds = await uploadReferenceImageForAsset();
+
+            if (!referencePreviousTileIds) {
+              throw new Error("Could not upload reference image");
+            }
+
+            setStatus("", "Reference image uploading. Waiting for asset...");
+
+            const referenceResult = await waitForCompletion(
+              referencePreviousTileIds,
+            );
+
+            if (referenceResult.status !== "done") {
+              throw new Error(
+                referenceResult.status === "failed"
+                  ? "Reference image generation failed"
+                  : "Reference image generation timed out",
+              );
+            }
+
+            referenceAssetSearchText = getGeneratedAssetSearchText(
+              referenceResult.tile,
+            );
+
+            if (!referenceAssetSearchText) {
+              throw new Error("Could not identify reference asset");
+            }
+
+            setStatus("", `Reference asset ready: ${referenceAssetSearchText}`);
+          }
+
+          const injected = await injectPrompt(flowPrompt);
+
+          if (!injected?.ok) {
+            throw new Error("Prompt was not accepted by the editor");
+          }
+
+          let previousTileIds = injected.previousTileIds;
+
+          if (!injected.autoSubmitted) {
+            await sleep(2500);
+            previousTileIds = getGeneratedTileIds();
+
+            const submitted = await clickSubmit();
+
+            if (!submitted) {
+              throw new Error("Could not find or click the submit button");
+            }
+          }
+
           setStatus(
             "",
-            `Reference image already in assets: ${referenceAssetSearchText}`,
+            injected.autoSubmitted
+              ? `Reference image started generation. Waiting… (${i + 1}/${queue.length})`
+              : `Submitted. Waiting for generation to finish… (${i + 1}/${queue.length})`,
           );
-        }
-      }
 
-      if (referenceImage && !referenceAssetSearchText) {
-        const referencePreviousTileIds = await uploadReferenceImageForAsset();
+          let result = await waitForCompletion(previousTileIds);
 
-        if (!referencePreviousTileIds) {
+          if (result.status !== "done") {
+            throw new Error(
+              result.status === "failed"
+                ? `Prompt ${i + 1} failed during generation`
+                : `Prompt ${i + 1} timed out`,
+            );
+          }
+
+          if (injected.autoSubmitted) {
+            setStatus(
+              "",
+              "Reference generation done. Adding generated image to prompt...",
+            );
+
+            const assetAdded = await addGeneratedAssetToPrompt(result.tile);
+
+            if (!assetAdded) {
+              throw new Error("Could not add generated image to prompt");
+            }
+
+            const promptAdded = await addPromptTextToCurrentPrompt(flowPrompt);
+
+            if (!promptAdded) {
+              throw new Error("Could not add prompt text after generated image");
+            }
+
+            await sleep(1500);
+            previousTileIds = getGeneratedTileIds();
+
+            const submitted = await clickSubmit();
+
+            if (!submitted) {
+              throw new Error("Could not submit prompt with generated image");
+            }
+
+            setStatus(
+              "",
+              `Submitted with generated image. Waiting... (${i + 1}/${queue.length})`,
+            );
+
+            result = await waitForCompletion(previousTileIds);
+
+            if (result.status !== "done") {
+              throw new Error(
+                result.status === "failed"
+                  ? `Prompt ${i + 1} failed during final generation`
+                  : `Prompt ${i + 1} timed out during final generation`,
+              );
+            }
+          }
+
+          const baseFilename = makeFilenameFromPrompt(i, flowPrompt);
+          const filename = buildDownloadFilename(downloadFolder, baseFilename);
+          let metaQueued = false;
+
+          const queueMetaFromGeneratedImage = async () => {
+            const imagePayload = await extractTileImagePayload(result.tile);
+
+            if (!imagePayload) {
+              return false;
+            }
+
+            item.metaStatus = "queued";
+            item.metaError = "";
+            renderQueue();
+
+            const metaExt = /png/i.test(imagePayload.mimeType)
+              ? ".png"
+              : /webp/i.test(imagePayload.mimeType)
+                ? ".webp"
+                : ".jpg";
+
+            const metaEnqueued = await enqueueMetaJob({
+              jobId: item.id,
+              flowPrompt,
+              metaPrompt,
+              outputSubfolder: downloadFolder,
+              imageName: `${baseFilename}${metaExt}`,
+              imageDataUrl: imagePayload.dataUrl,
+              imageType: imagePayload.mimeType,
+              outName: `${baseFilename}-video.mp4`,
+            });
+
+            if (!metaEnqueued) {
+              item.metaStatus = "failed";
+              item.metaError = "Could not enqueue Meta job";
+              renderQueue();
+              return false;
+            }
+
+            return true;
+          };
+
+          try {
+            metaQueued = await queueMetaFromGeneratedImage();
+          } catch (err) {
+            console.warn("[Flow Queue] Could not queue Meta job before download:", err);
+          }
+
+          setStatus("", `Generation done. Starting 2K download as ${filename}…`);
+
+          await activateFlowTab();
+          await sleep(500);
+
+          const downloaded = await downloadTile(result.tile, filename);
+
+          if (!downloaded) {
+            console.warn(
+              "[Flow Queue] Download step failed, continuing queue anyway",
+            );
+            setStatus(
+              "warn",
+              "Generation done, but download could not be confirmed",
+            );
+          }
+
+          if (!metaQueued) {
+            try {
+              setStatus("", "Preparing generated image for Meta...");
+              metaQueued = await queueMetaFromGeneratedImage();
+            } catch (err) {
+              console.warn("[Flow Queue] Could not queue Meta job after download:", err);
+            }
+
+            if (!metaQueued) {
+              item.metaStatus = "failed";
+              item.metaError = "Could not extract generated image for Meta";
+              renderQueue();
+            }
+          }
+
+          item.done = true;
+          item.downloadFailed = !downloaded;
+        } catch (err) {
           failed = true;
-          failureMessage = "Could not upload reference image";
+          failureMessage = err?.message || String(err);
+          setStatus("err", failureMessage);
+          break;
+        } finally {
           item.active = false;
           renderQueue();
-          break;
         }
 
-        setStatus("", "Reference image uploading. Waiting for asset...");
-
-        const referenceResult = await waitForCompletion(
-          referencePreviousTileIds,
-        );
-
-        if (referenceResult.status !== "done") {
-          failed = true;
-          failureMessage =
-            referenceResult.status === "failed"
-              ? "Reference image generation failed"
-              : "Reference image generation timed out";
+        if (i < queue.length - 1 && !stopFlag) {
           setStatus(
-            referenceResult.status === "failed" ? "err" : "warn",
-            failureMessage,
+            "",
+            `Download step finished. Waiting ${delayBetween}s before next prompt…`,
           );
-          item.active = false;
-          renderQueue();
-          break;
-        }
-
-        referenceAssetSearchText = getGeneratedAssetSearchText(
-          referenceResult.tile,
-        );
-
-        if (!referenceAssetSearchText) {
-          failed = true;
-          failureMessage = "Could not identify reference asset";
-          setStatus("err", failureMessage);
-          item.active = false;
-          renderQueue();
-          break;
-        }
-
-        setStatus("", `Reference asset ready: ${referenceAssetSearchText}`);
-      }
-
-      const injected = await injectPrompt(item.text);
-
-      if (!injected?.ok) {
-        failed = true;
-        failureMessage = "Prompt was not accepted by the editor";
-        setStatus("err", failureMessage);
-        item.active = false;
-        renderQueue();
-        break;
-      }
-
-      let previousTileIds = injected.previousTileIds;
-
-      if (!injected.autoSubmitted) {
-        await sleep(2500);
-        previousTileIds = getGeneratedTileIds();
-
-        const submitted = await clickSubmit();
-
-        if (!submitted) {
-          failed = true;
-          failureMessage = "Could not find or click the submit button";
-          setStatus("err", failureMessage);
-          item.active = false;
-          renderQueue();
-          break;
+          await sleep(delayBetween * 1000);
         }
       }
-
-      setStatus(
-        "",
-        injected.autoSubmitted
-          ? `Reference image started generation. Waiting… (${i + 1}/${queue.length})`
-          : `Submitted. Waiting for generation to finish… (${i + 1}/${queue.length})`,
-      );
-
-      let result = await waitForCompletion(previousTileIds);
-
-      if (result.status !== "done") {
-        failed = true;
-
-        failureMessage =
-          result.status === "failed"
-            ? `Prompt ${i + 1} failed during generation`
-            : `Prompt ${i + 1} timed out`;
-
-        setStatus(result.status === "failed" ? "err" : "warn", failureMessage);
-
-        item.active = false;
-        renderQueue();
-        break;
-      }
-
-      if (injected.autoSubmitted) {
-        setStatus(
-          "",
-          "Reference generation done. Adding generated image to prompt...",
-        );
-
-        const assetAdded = await addGeneratedAssetToPrompt(result.tile);
-
-        if (!assetAdded) {
-          failed = true;
-          failureMessage = "Could not add generated image to prompt";
-          item.active = false;
-          renderQueue();
-          break;
-        }
-
-        const promptAdded = await addPromptTextToCurrentPrompt(item.text);
-
-        if (!promptAdded) {
-          failed = true;
-          failureMessage = "Could not add prompt text after generated image";
-          item.active = false;
-          renderQueue();
-          break;
-        }
-
-        await sleep(1500);
-        previousTileIds = getGeneratedTileIds();
-
-        const submitted = await clickSubmit();
-
-        if (!submitted) {
-          failed = true;
-          failureMessage = "Could not submit prompt with generated image";
-          setStatus("err", failureMessage);
-          item.active = false;
-          renderQueue();
-          break;
-        }
-
-        setStatus(
-          "",
-          `Submitted with generated image. Waiting... (${i + 1}/${queue.length})`,
-        );
-
-        result = await waitForCompletion(previousTileIds);
-
-        if (result.status !== "done") {
-          failed = true;
-
-          failureMessage =
-            result.status === "failed"
-              ? `Prompt ${i + 1} failed during final generation`
-              : `Prompt ${i + 1} timed out during final generation`;
-
-          setStatus(
-            result.status === "failed" ? "err" : "warn",
-            failureMessage,
-          );
-
-          item.active = false;
-          renderQueue();
-          break;
-        }
-      }
-
-      const baseFilename = makeFilenameFromPrompt(i, item.text);
-      const filename = buildDownloadFilename(downloadFolder, baseFilename);
-
-      setStatus("", `Generation done. Starting 2K download as ${filename}…`);
-
-      const downloaded = await downloadTile(result.tile, filename);
-
-      if (!downloaded) {
-        console.warn(
-          "[Flow Queue] Download step failed, continuing queue anyway",
-        );
-        setStatus(
-          "warn",
-          "Generation done, but download could not be confirmed",
-        );
-      }
-
-      item.done = true;
-      item.active = false;
-      renderQueue();
-
-      if (i < queue.length - 1 && !stopFlag) {
-        setStatus(
-          "",
-          `Download step finished. Waiting ${delayBetween}s before next prompt…`,
-        );
-        await sleep(delayBetween * 1000);
-      }
+    } finally {
+      running = false;
+      runBtn.disabled = false;
+      titleDot.classList.remove("running");
     }
-
-    running = false;
-    runBtn.disabled = false;
-    titleDot.classList.remove("running");
 
     if (stopFlag) {
       setStatus("warn", "Queue stopped by user");
@@ -3061,7 +3585,21 @@
     }
 
     const allDone = queue.every((q) => q.done);
-    setStatus("ok", allDone ? "✓ All prompts completed!" : "Finished");
+    const dlFailures = queue.filter((q) => q.downloadFailed).length;
+    const metaPending = queue.some(
+      (q) => q.metaStatus === "queued" || q.metaStatus === "running",
+    );
+
+    if (dlFailures > 0) {
+      setStatus(
+        "warn",
+        `Generated all, but ${dlFailures} download(s) could not be confirmed`,
+      );
+    } else if (metaPending) {
+      setStatus("ok", "Flow done. Meta videos are still processing in the background.");
+    } else {
+      setStatus("ok", allDone ? "✓ All prompts completed!" : "Finished");
+    }
   }
 
   // ─── CONTROLS ─────────────────────────────────────────────────
@@ -3084,5 +3622,6 @@
 
   // ─── INIT ─────────────────────────────────────────────────────
   renderQueue();
+  registerFlowController();
   setStatus("", "Ready — add prompts and click Run All");
 })();

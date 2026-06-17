@@ -151,7 +151,8 @@ html.fpq-docked body {
   background: var(--fpq-bg);
 }
 
-#fpq-textarea {
+#fpq-textarea,
+#fpq-meta-textarea {
   all: initial;
   font-family: var(--fpq-font-mono);
   font-size: 12.5px;
@@ -169,11 +170,22 @@ html.fpq-docked body {
   transition: border-color 0.2s;
 }
 
-#fpq-textarea::placeholder { color: var(--fpq-muted); }
-#fpq-textarea:focus {
+#fpq-textarea::placeholder,
+#fpq-meta-textarea::placeholder { color: var(--fpq-muted); }
+#fpq-textarea:focus,
+#fpq-meta-textarea:focus {
   outline: none;
   border-color: var(--fpq-accent);
   box-shadow: 0 0 0 3px rgba(124,109,250,0.12);
+}
+
+.fpq-prompt-label {
+  font-family: var(--fpq-font-mono);
+  font-size: 10.5px;
+  color: var(--fpq-muted);
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
+  margin-top: 4px;
 }
 
 #fpq-reference-drop {
